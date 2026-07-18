@@ -1,4 +1,6 @@
+import "nanopb.proto";
+
 message Header {
-    optional string uri = 0x01;
-    optional string method = 0x03;
+    optional string uri = 0x01 [(nanopb).max_size = 256, (nanopb).fixed_length = false];
+    optional string method = 0x03 [(nanopb).max_size = 64, (nanopb).fixed_length = false];
 }

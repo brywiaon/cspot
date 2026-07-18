@@ -1,3 +1,5 @@
+import "nanopb.proto";
+
 enum MessageType {
     kMessageTypeHello = 0x1;
     kMessageTypeGoodbye = 0x2;
@@ -30,12 +32,12 @@ enum PlayStatus {
 message TrackRef {
     optional bytes gid = 0x1;
     optional string uri = 0x2;
-    optional bool queued = 0x3;
+    optional bool queued = 0x3 [(nanopb).type = FT_CALLBACK];
     optional string context = 0x4;
 }
 
 message State {
-    optional string context_uri = 0x2;
+    optional string context_uri = 0x2 [(nanopb).type = FT_POINTER];
     optional uint32 index = 0x3;
     optional uint32 position_ms = 0x4;
     optional PlayStatus status = 0x5;
@@ -66,27 +68,27 @@ enum CapabilityType {
 
 message Capability {
     optional CapabilityType typ = 0x1;
-    repeated int64 intValue = 0x2;
-    repeated string stringValue = 0x3;
+    repeated int64 intValue = 0x2 [(nanopb).max_count = 50];
+    repeated string stringValue = 0x3 [(nanopb).max_count = 50, (nanopb).max_size = 50];
 }
 
 message DeviceState {
-    optional string sw_version = 0x1;
+    optional string sw_version = 0x1 [(nanopb).type = FT_POINTER];
     optional bool is_active = 0xa;
     optional bool can_play = 0xb;
     optional uint32 volume = 0xc;
-    optional string name = 0xd;
+    optional string name = 0xd [(nanopb).type = FT_POINTER];
     optional uint32 error_code = 0xe;
     optional int64 became_active_at = 0xf;
     optional string error_message = 0x10;
-    repeated Capability capabilities = 0x11;
+    repeated Capability capabilities = 0x11 [(nanopb).max_count = 17, (nanopb).fixed_count = false];
     repeated string local_uris = 0x12;
 }
 
 message Frame {
     optional uint32 version = 0x1;
-    optional string ident = 0x2;
-    optional string protocol_version = 0x3;
+    optional string ident = 0x2 [(nanopb).type = FT_POINTER];
+    optional string protocol_version = 0x3 [(nanopb).type = FT_POINTER];
     optional uint32 seq_nr = 0x4;
     optional MessageType typ = 0x5;
     optional DeviceState device_state = 0x7;
@@ -94,5 +96,5 @@ message Frame {
     optional uint32 position = 0xd;
     optional uint32 volume = 0xe;
     optional int64 state_update_id = 0x11;
-    repeated string recipient = 0x12;
+    repeated string recipient = 0x12 [(nanopb).type = FT_POINTER];
 }

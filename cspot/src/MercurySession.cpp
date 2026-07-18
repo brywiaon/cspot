@@ -22,7 +22,7 @@
 using namespace cspot;
 
 MercurySession::MercurySession(std::shared_ptr<TimeProvider> timeProvider)
-    : bell::Task("mercury_dispatcher", 4 * 1024, 3, 1) {
+    : bell::Task("mercury_dispatcher", 8 * 1024, 7, 1) {
   this->timeProvider = timeProvider;
 }
 
@@ -36,10 +36,22 @@ void MercurySession::runTask() {
 
   this->executeEstabilishedCallback = true;
   while (isRunning) {
+    if (!shanConn || !conn || !conn->isConnected()) {
+      failAllPending();
+      reconnect();
+      continue;
+    }
+
     cspot::Packet packet = {};
     try {
       packet = shanConn->recvPacket();
-      CSPOT_LOG(info, "Received packet, command: %d", packet.command);
+      if (!conn || !conn->isConnected() || packet.command == 0) {
+        failAllPending();
+        reconnect();
+        continue;
+      }
+
+      CSPOT_LOG(debug, "Received packet, command: %d", packet.command);
 
       if (static_cast<RequestType>(packet.command) == RequestType::PING) {
         timeProvider->syncWithPingPacket(packet.data);
@@ -70,7 +82,16 @@ void MercurySession::reconnect() {
     this->shanConn = nullptr;
 
     this->connectWithRandomAp();
-    this->authenticate(this->authBlob);
+    auto token = this->authenticate(this->authBlob);
+    if (!this->conn || !this->conn->isConnected() || !this->shanConn ||
+        token.empty()) {
+      CSPOT_LOG(error, "Spotify reconnect did not establish a session");
+      BELL_SLEEP_MS(5000);
+      if (isRunning) {
+        return reconnect();
+      }
+      return;
+    }
 
     CSPOT_LOG(info, "Reconnection successful");
 

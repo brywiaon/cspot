@@ -2,6 +2,7 @@
 
 #include <stdio.h>           // for sprintf
 #include <initializer_list>  // for initializer_list
+#include <algorithm>         // for replace
 
 #include "BellLogger.h"                  // for AbstractLogger
 #include "ConstantParameters.h"          // for brandName, cspot, protoc...
@@ -30,6 +31,12 @@ LoginBlob::LoginBlob(std::string name) {
 
 std::vector<uint8_t> LoginBlob::decodeBlob(
     const std::vector<uint8_t>& blob, const std::vector<uint8_t>& sharedKey) {
+  if (blob.size() < 36 || sharedKey.empty()) {
+    CSPOT_LOG(error, "Invalid zeroconf blob sizes: blob=%d shared=%d",
+              (int)blob.size(), (int)sharedKey.size());
+    return {};
+  }
+
   // 0:16 - iv; 17:-20 - blob; -20:0 - checksum
   auto iv = std::vector<uint8_t>(blob.begin(), blob.begin() + 16);
   auto encrypted = std::vector<uint8_t>(blob.begin() + 16, blob.end() - 20);
@@ -56,7 +63,7 @@ std::vector<uint8_t> LoginBlob::decodeBlob(
 
   // Check checksum
   if (mac != checksum) {
-    CSPOT_LOG(error, "Mac doesn't match!");
+    CSPOT_LOG(error, "Mac doesn't match; attempting zeroconf decrypt anyway");
   }
 
   encryptionKey =
@@ -67,12 +74,19 @@ std::vector<uint8_t> LoginBlob::decodeBlob(
 }
 
 uint32_t LoginBlob::readBlobInt(const std::vector<uint8_t>& data) {
+  if (blobSkipPosition < 0 || blobSkipPosition >= (int)data.size()) {
+    return 0;
+  }
   auto lo = data[blobSkipPosition];
   if ((int)(lo & 0x80) == 0) {
     this->blobSkipPosition += 1;
     return lo;
   }
 
+  if (blobSkipPosition + 1 >= (int)data.size()) {
+    this->blobSkipPosition = data.size();
+    return 0;
+  }
   auto hi = data[blobSkipPosition + 1];
   this->blobSkipPosition += 2;
 
@@ -84,6 +98,10 @@ std::vector<uint8_t> LoginBlob::decodeBlobSecondary(
     const std::string& deviceId) {
   auto encryptedString = std::string(blob.begin(), blob.end());
   auto blobData = crypto->base64Decode(encryptedString);
+  if (blobData.size() < 16) {
+    CSPOT_LOG(error, "Invalid secondary blob size: %d", (int)blobData.size());
+    return {};
+  }
 
   crypto->sha1Init();
   crypto->sha1Update(std::vector<uint8_t>(deviceId.begin(), deviceId.end()));
@@ -101,32 +119,46 @@ std::vector<uint8_t> LoginBlob::decodeBlobSecondary(
 
   auto l = blobData.size();
 
-  for (int i = 0; i < l - 16; i++) {
+  for (size_t i = 0; i < l - 16; i++) {
     blobData[l - i - 1] ^= blobData[l - i - 17];
   }
 
   return blobData;
 }
 
-void LoginBlob::loadZeroconf(const std::vector<uint8_t>& blob,
+bool LoginBlob::loadZeroconf(const std::vector<uint8_t>& blob,
                              const std::vector<uint8_t>& sharedKey,
                              const std::string& deviceId,
                              const std::string& username) {
 
   auto partDecoded = this->decodeBlob(blob, sharedKey);
+  if (partDecoded.empty()) {
+    return false;
+  }
   auto loginData = this->decodeBlobSecondary(partDecoded, username, deviceId);
+  if (loginData.empty()) {
+    return false;
+  }
 
   // Parse blob
   blobSkipPosition = 1;
+  if (blobSkipPosition >= (int)loginData.size()) return false;
   blobSkipPosition += readBlobInt(loginData);
   blobSkipPosition += 1;
+  if (blobSkipPosition >= (int)loginData.size()) return false;
   this->authType = readBlobInt(loginData);
   blobSkipPosition += 1;
+  if (blobSkipPosition >= (int)loginData.size()) return false;
   auto authSize = readBlobInt(loginData);
+  if (blobSkipPosition < 0 ||
+      blobSkipPosition + (int)authSize > (int)loginData.size()) {
+    return false;
+  }
   this->username = username;
   this->authData =
       std::vector<uint8_t>(loginData.begin() + blobSkipPosition,
                            loginData.begin() + blobSkipPosition + authSize);
+  return true;
 }
 
 void LoginBlob::loadUserPass(const std::string& username,
@@ -180,22 +212,39 @@ std::string LoginBlob::toJson() {
 #endif
 }
 
-void LoginBlob::loadZeroconfQuery(
+bool LoginBlob::loadZeroconfQuery(
     std::map<std::string, std::string>& queryParams) {
   // Get all urlencoded params
+  if (!queryParams.count("userName") || !queryParams.count("blob") ||
+      !queryParams.count("clientKey")) {
+    CSPOT_LOG(error, "Missing zeroconf query fields");
+    return false;
+  }
   auto username = queryParams["userName"];
   auto blobString = queryParams["blob"];
   auto clientKeyString = queryParams["clientKey"];
   auto deviceName = queryParams["deviceName"];
 
-  // client key and bytes are urlencoded
+  std::replace(clientKeyString.begin(), clientKeyString.end(), ' ', '+');
+  std::replace(blobString.begin(), blobString.end(), ' ', '+');
+
+  CSPOT_LOG(info,
+            "Zeroconf blob POST fields: user=%d clientKeyB64=%d blobB64=%d",
+            (int)username.size(), (int)clientKeyString.size(),
+            (int)blobString.size());
+
   auto clientKeyBytes = crypto->base64Decode(clientKeyString);
   auto blobBytes = crypto->base64Decode(blobString);
+  if (clientKeyBytes.empty() || blobBytes.empty()) {
+    CSPOT_LOG(error, "Invalid zeroconf base64 fields: clientKey=%d blob=%d",
+              (int)clientKeyBytes.size(), (int)blobBytes.size());
+    return false;
+  }
 
   // Generated secret based on earlier generated DH
   auto secretKey = crypto->dhCalculateShared(clientKeyBytes);
 
-  this->loadZeroconf(blobBytes, secretKey, deviceId, username);
+  return this->loadZeroconf(blobBytes, secretKey, deviceId, username);
 }
 
 std::string LoginBlob::buildZeroconfInfo() {

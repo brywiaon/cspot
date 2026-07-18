@@ -1,4 +1,5 @@
 // A minimal set of protobuf messages required to auth through login5, with a stored credential.
+import "nanopb.proto";
 message StoredCredential {
   required string username = 1;
   required bytes data = 2;
@@ -18,7 +19,7 @@ message LoginRequest {
 }
 
 message LoginOk {
-    required string access_token = 2;
+    required string access_token = 2 [(nanopb).type = FT_POINTER];
     optional int32 access_token_expires_in = 4;
 }
 

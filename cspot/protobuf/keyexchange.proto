@@ -1,5 +1,7 @@
+import "nanopb.proto";
+
 message LoginCryptoDiffieHellmanChallenge {
-    required bytes gs = 0xa; 
+    required bytes gs = 0xa [(nanopb).max_size = 96, (nanopb).fixed_length = true]; 
 }
 
 message LoginCryptoChallengeUnion {
@@ -15,7 +17,7 @@ enum Product {
 }
 
 message LoginCryptoDiffieHellmanHello {
-    required bytes gc = 0xa;
+    required bytes gc = 0xa [(nanopb).max_size = 96, (nanopb).fixed_length = true];
     required uint32 server_keys_known = 0x14;
 }
 
@@ -75,7 +77,7 @@ message APResponseMessage {
 }
 
 message LoginCryptoDiffieHellmanResponse {
-    required bytes hmac = 0xa; 
+    required bytes hmac = 0xa [(nanopb).max_size = 20, (nanopb).fixed_length = true]; 
 }
 
 message LoginCryptoResponseUnion {
@@ -95,8 +97,8 @@ message ClientResponsePlaintext {
 message ClientHello {
     required BuildInfo build_info = 0xa; 
     required LoginCryptoHelloUnion login_crypto_hello = 0x32; 
-    repeated Cryptosuite cryptosuites_supported = 0x1e; 
-    required bytes client_nonce = 0x3c; 
-    optional bytes padding = 0x46; 
+    repeated Cryptosuite cryptosuites_supported = 0x1e [(nanopb).max_count = 1, (nanopb).fixed_count = true]; 
+    required bytes client_nonce = 0x3c [(nanopb).max_size = 16, (nanopb).fixed_length = true]; 
+    optional bytes padding = 0x46 [(nanopb).max_size = 1, (nanopb).fixed_length = true]; 
     optional FeatureSet feature_set = 0x50; 
 }

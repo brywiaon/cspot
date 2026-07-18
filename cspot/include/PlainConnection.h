@@ -28,6 +28,7 @@ class PlainConnection {
    */
   void connect(const std::string& apAddress);
   void close();
+  bool isConnected() const { return apSock >= 0; }
 
   timeoutCallback timeoutHandler;
   std::vector<uint8_t> sendPrefixPacket(const std::vector<uint8_t>& prefix,

@@ -1,9 +1,15 @@
 #include "TrackPlayer.h"
 
+#include <cinttypes>
 #include <mutex>        // for mutex, scoped_lock
 #include <string>       // for string
 #include <type_traits>  // for remove_extent_t
 #include <vector>       // for vector, vector<>::value_type
+
+#include "freertos/task.h"
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
 
 #include "BellLogger.h"        // for AbstractLogger
 #include "BellUtils.h"         // for BELL_SLEEP_MS
@@ -23,12 +29,25 @@
   (ov_read(file, buffer, bufferSize, section))
 #endif
 
+static constexpr uint32_t INITIAL_HANDOFF_SEEK_BYPASS_MS = 0;
+static constexpr uint32_t PCM_RATE_LOG_INTERVAL_MS = 1000;
+
 namespace cspot {
 struct Context;
 struct TrackReference;
 }  // namespace cspot
 
 using namespace cspot;
+
+#ifdef ESP_PLATFORM
+static uint32_t cspotPlayerNowMs() {
+  return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+#else
+static uint32_t cspotPlayerNowMs() {
+  return 0;
+}
+#endif
 
 static size_t vorbisReadCb(void* ptr, size_t size, size_t nmemb,
                            TrackPlayer* self) {
@@ -44,14 +63,32 @@ static int vorbisSeekCb(TrackPlayer* self, int64_t offset, int whence) {
   return self->_vorbisSeek(offset, whence);
 }
 
+static int vorbisNoSeekCb(TrackPlayer*, int64_t, int) {
+  return -1;
+}
+
 static long vorbisTellCb(TrackPlayer* self) {
   return self->_vorbisTell();
 }
 
+static long vorbisNoTellCb(TrackPlayer*) {
+  return -1;
+}
+
+namespace {
+uint32_t trackPlayerNowMs() {
+#ifdef ESP_PLATFORM
+  return (uint32_t)(esp_timer_get_time() / 1000ULL);
+#else
+  return 0;
+#endif
+}
+}  // namespace
+
 TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          std::shared_ptr<cspot::TrackQueue> trackQueue,
                          EOFCallback eof, TrackLoadedCallback trackLoaded)
-    : bell::Task("cspot_player", 48 * 1024, 5, 1) {
+    : bell::Task("cspot_player", 64 * 1024, 15, 1) {
   this->ctx = ctx;
   this->eofCallback = eof;
   this->trackLoaded = trackLoaded;
@@ -66,10 +103,17 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
       (decltype(ov_callbacks::close_func))&vorbisCloseCb,
       (decltype(ov_callbacks::tell_func))&vorbisTellCb,
   };
+  vorbisStreamCallbacks = {
+      (decltype(ov_callbacks::read_func))&vorbisReadCb,
+      (decltype(ov_callbacks::seek_func))&vorbisNoSeekCb,
+      (decltype(ov_callbacks::close_func))&vorbisCloseCb,
+      (decltype(ov_callbacks::tell_func))&vorbisNoTellCb,
+  };
 }
 
 TrackPlayer::~TrackPlayer() {
   isRunning = false;
+  CDNAudioFile::abortActiveStream();
   resetState();
   std::scoped_lock lock(runningMutex);
 }
@@ -83,15 +127,18 @@ void TrackPlayer::start() {
 
 void TrackPlayer::stop() {
   isRunning = false;
+  CDNAudioFile::abortActiveStream();
   resetState();
   std::scoped_lock lock(runningMutex);
 }
 
 void TrackPlayer::resetState(bool paused) {
   // Mark for reset
-  this->pendingReset = true;
   this->currentSongPlaying = false;
+  this->pendingSeekPositionMs = 0;
   this->startPaused = paused;
+  this->pendingReset = true;
+  CDNAudioFile::abortActiveStream();
 
   std::scoped_lock lock(dataOutMutex);
 
@@ -99,11 +146,6 @@ void TrackPlayer::resetState(bool paused) {
 }
 
 void TrackPlayer::seekMs(size_t ms) {
-  if (inFuture) {
-    // We're in the middle of the next track, so we need to reset the player in order to seek
-    resetState();
-  }
-
   CSPOT_LOG(info, "Seeking...");
   this->pendingSeekPositionMs = ms;
 }
@@ -116,8 +158,14 @@ void TrackPlayer::runTask() {
   int trackOffset = 0;
   bool eof = false;
   bool endOfQueueReached = false;
+  uint32_t lastDecodeRateLogMs = trackPlayerNowMs();
+  uint64_t producedBytesSinceLog = 0;
+  uint32_t decoderIdleMs = 0;
 
   while (isRunning) {
+    bool retryCurrentTrack = false;
+    bool retryCurrentTrackFast = false;
+
     // Ensure we even have any tracks to play
     if (!this->trackQueue->hasTracks() ||
         (!pendingReset && endOfQueueReached && trackQueue->isFinished())) {
@@ -136,7 +184,7 @@ void TrackPlayer::runTask() {
 
     // Wait 800ms. If next reset is requested in meantime, restart the queue.
     // Gets rid of excess actions during rapid queueing
-    BELL_SLEEP_MS(50);
+      BELL_SLEEP_MS(5);
 
     if (pendingReset) {
       continue;
@@ -150,7 +198,7 @@ void TrackPlayer::runTask() {
         track = nullptr;
       }
 
-      BELL_SLEEP_MS(100);
+      BELL_SLEEP_MS(10);
       continue;
     }
 
@@ -159,18 +207,25 @@ void TrackPlayer::runTask() {
     inFuture = trackOffset > 0;
 
     if (track->state != QueuedTrack::State::READY) {
-      track->loadedSemaphore->twait(5000);
+      auto waitStartMs = cspotPlayerNowMs();
+      track->loadedSemaphore->twait(12000);
 
       if (track->state != QueuedTrack::State::READY) {
-        CSPOT_LOG(error, "Track failed to load, skipping it");
-        this->eofCallback();
+        CSPOT_LOG(error,
+                  "Track failed to load; holding current queue position state=%d wait=%u total=%u",
+                  (int)track->state, (unsigned)(cspotPlayerNowMs() - waitStartMs),
+                  (unsigned)(track->loadStartMs ? cspotPlayerNowMs() - track->loadStartMs : 0));
+        track = nullptr;
+        BELL_SLEEP_MS(500);
         continue;
       }
     }
 
-    CSPOT_LOG(info, "Got track ID=%s", track->identifier.c_str());
-
     currentSongPlaying = true;
+    uint32_t decodedPlaybackMs = track->requestedPosition;
+    size_t finalStreamPosition = 0;
+    size_t finalStreamSize = 0;
+    size_t decodedBytesSinceYield = 0;
 
     {
       std::scoped_lock lock(playbackMutex);
@@ -178,9 +233,29 @@ void TrackPlayer::runTask() {
       currentTrackStream = track->getAudioFile();
 
       // Open the stream
-      currentTrackStream->openStream();
+      for (int openAttempt = 0; openAttempt < 3; openAttempt++) {
+        currentTrackStream->openStream();
+        if (currentTrackStream->getSize() > 0 || pendingReset ||
+            !currentSongPlaying) {
+          break;
+        }
+        CSPOT_LOG(error, "Track stream open failed, retrying attempt=%d",
+                  openAttempt + 1);
+        BELL_SLEEP_MS(350);
+      }
+      if (currentTrackStream->getSize() == 0) {
+        CSPOT_LOG(error, "Track stream open failed; holding current queue position");
+        currentTrackStream = nullptr;
+        currentSongPlaying = false;
+        track->loading = false;
+        track = nullptr;
+        BELL_SLEEP_MS(500);
+        continue;
+      }
 
       if (pendingReset || !currentSongPlaying) {
+        currentTrackStream = nullptr;
+        track->loading = false;
         continue;
       }
 
@@ -189,21 +264,47 @@ void TrackPlayer::runTask() {
         startPaused = false;
       }
 
-      int32_t r =
-          ov_open_callbacks(this, &vorbisFile, NULL, 0, vorbisCallbacks);
-
       if (pendingSeekPositionMs > 0) {
         track->requestedPosition = pendingSeekPositionMs;
+        pendingSeekPositionMs = 0;
       }
 
-      if (track->requestedPosition > 0) {
+      bool vorbisSeekableOpen = track->requestedPosition > 0;
+      auto openStartMs = cspotPlayerNowMs();
+      int32_t r = ov_open_callbacks(this, &vorbisFile, NULL, 0,
+                                    vorbisSeekableOpen ? vorbisCallbacks
+                                                       : vorbisStreamCallbacks);
+      CSPOT_LOG(info, "Vorbis open mode=%s result=%d dt=%u total=%u",
+                vorbisSeekableOpen ? "seek" : "stream", (int)r,
+                (unsigned)(cspotPlayerNowMs() - openStartMs),
+                (unsigned)(track->loadStartMs ? cspotPlayerNowMs() - track->loadStartMs : 0));
+      (void)openStartMs;
+      if (r < 0) {
+        CSPOT_LOG(error, "Vorbis open failed result=%d; retrying current track", (int)r);
+        retryCurrentTrack = true;
+        retryCurrentTrackFast = true;
+        currentSongPlaying = false;
+        currentTrackStream = nullptr;
+        track->loading = false;
+        continue;
+      }
+
+      if (track->requestedPosition > 0 &&
+          track->requestedPosition <= INITIAL_HANDOFF_SEEK_BYPASS_MS) {
+        track->requestedPosition = 0;
+        decodedPlaybackMs = 0;
+      } else if (track->requestedPosition > 0) {
+        auto seekStartMs = cspotPlayerNowMs();
         VORBIS_SEEK(&vorbisFile, track->requestedPosition);
+        CSPOT_LOG(error, "Track initial seek pos=%u dt=%u total=%u",
+                  (unsigned)track->requestedPosition,
+                  (unsigned)(cspotPlayerNowMs() - seekStartMs),
+                  (unsigned)(track->loadStartMs ? cspotPlayerNowMs() - track->loadStartMs : 0));
       }
 
       eof = false;
       track->loading = true;
-
-      CSPOT_LOG(info, "Playing");
+      decodedPlaybackMs = track->requestedPosition;
 
       while (!eof && currentSongPlaying) {
         // Execute seek if needed
@@ -213,21 +314,79 @@ void TrackPlayer::runTask() {
           // Reset the pending seek position
           pendingSeekPositionMs = 0;
 
+          if (!vorbisSeekableOpen) {
+            track->requestedPosition = seekPosition;
+            retryCurrentTrack = true;
+            retryCurrentTrackFast = true;
+            currentSongPlaying = false;
+            eof = false;
+            break;
+          }
+
           // Seek to the new position
           VORBIS_SEEK(&vorbisFile, seekPosition);
+          decodedPlaybackMs = seekPosition;
         }
 
+        uint32_t vorbisReadStartMs = trackPlayerNowMs();
         long ret = VORBIS_READ(&vorbisFile, (char*)&pcmBuffer[0],
                                pcmBuffer.size(), &currentSection);
+        uint32_t vorbisReadDtMs = trackPlayerNowMs() - vorbisReadStartMs;
+        decoderIdleMs += vorbisReadDtMs;
 
         if (ret == 0) {
+          size_t streamPosition = currentTrackStream ? currentTrackStream->getPosition() : 0;
+          size_t streamSize = currentTrackStream ? currentTrackStream->getSize() : 0;
+          uint32_t trackDuration = track->trackInfo.duration;
+          if (streamSize > 0 && streamPosition + (256 * 1024) < streamSize) {
+            CSPOT_LOG(error,
+                      "False EOF before end of Spotify stream, retrying track pos=%u size=%u",
+                      (unsigned)streamPosition, (unsigned)streamSize);
+            retryCurrentTrack = true;
+            currentSongPlaying = false;
+            eof = false;
+            break;
+          }
+          constexpr uint32_t eofDecodeSlackMs = 1000;
+          constexpr uint32_t eofAcceptWindowMs = 1000;
+          uint32_t remainingPlaybackMs =
+              trackDuration > decodedPlaybackMs ? trackDuration - decodedPlaybackMs : 0;
+          bool streamIsTerminal = streamSize > 0 && streamPosition + (256 * 1024) >= streamSize;
+          bool durationLooksComplete = trackDuration > 0 &&
+                                      decodedPlaybackMs + eofDecodeSlackMs >= trackDuration;
+          if (streamIsTerminal || remainingPlaybackMs <= eofAcceptWindowMs || durationLooksComplete) {
+            CSPOT_LOG(info,
+                      "EOF terminal/near-end, treating as normal completion decoded=%u duration=%u remaining=%u streamPos=%u size=%u",
+                      (unsigned)decodedPlaybackMs, (unsigned)trackDuration,
+                      (unsigned)remainingPlaybackMs,
+                      (unsigned)streamPosition, (unsigned)streamSize);
+            eof = true;
+          } else if (trackDuration > 0 && decodedPlaybackMs + eofDecodeSlackMs < trackDuration) {
+            CSPOT_LOG(error,
+                      "Guarded early EOF, fast retrying current track decoded=%u duration=%u remaining=%u streamPos=%u size=%u",
+                      (unsigned)decodedPlaybackMs, (unsigned)trackDuration,
+                      (unsigned)(trackDuration - decodedPlaybackMs),
+                      (unsigned)streamPosition, (unsigned)streamSize);
+            track->requestedPosition =
+                decodedPlaybackMs > 1000 ? decodedPlaybackMs - 500 : decodedPlaybackMs;
+            retryCurrentTrack = true;
+            retryCurrentTrackFast = true;
+            currentSongPlaying = false;
+            eof = false;
+            break;
+          }
           CSPOT_LOG(info, "EOF");
           // and done :)
           eof = true;
         } else if (ret < 0) {
           CSPOT_LOG(error, "An error has occured in the stream %d", ret);
+          retryCurrentTrack = true;
           currentSongPlaying = false;
         } else {
+          producedBytesSinceLog += (uint64_t)ret;
+          decodedPlaybackMs +=
+              (uint32_t)(((uint64_t)ret * 1000ULL) / (44100ULL * 2ULL * 2ULL));
+          decodedBytesSinceYield += (size_t)ret;
           if (this->dataCallback != nullptr) {
             auto toWrite = ret;
 
@@ -243,11 +402,36 @@ void TrackPlayer::runTask() {
                                        toWrite, track->identifier);
               }
               if (written == 0) {
-                BELL_SLEEP_MS(50);
+                taskYIELD();
               }
               toWrite -= written;
             }
           }
+          if (decodedBytesSinceYield >= (512 * 1024)) {
+            decodedBytesSinceYield = 0;
+          }
+          if ((producedBytesSinceLog & ((512 * 1024) - 1)) == 0) {
+            taskYIELD();
+          }
+        }
+
+        uint32_t nowMs = trackPlayerNowMs();
+        if (nowMs != 0 && (lastDecodeRateLogMs == 0 ||
+                           (long)(nowMs - lastDecodeRateLogMs) >=
+                               (long)PCM_RATE_LOG_INTERVAL_MS)) {
+          uint32_t elapsedMs = lastDecodeRateLogMs == 0
+                                   ? PCM_RATE_LOG_INTERVAL_MS
+                                   : (nowMs - lastDecodeRateLogMs);
+          uint32_t producedPerSec = elapsedMs > 0
+                                        ? (uint32_t)((producedBytesSinceLog * 1000ULL) / elapsedMs)
+                                        : 0;
+          CSPOT_LOG(info,
+                    "PCM decode rate produced=%uB/s idle=%ums last_read_dt=%ums",
+                    (unsigned)producedPerSec, (unsigned)decoderIdleMs,
+                    (unsigned)vorbisReadDtMs);
+          producedBytesSinceLog = 0;
+          decoderIdleMs = 0;
+          lastDecodeRateLogMs = nowMs;
         }
       }
       ov_clear(&vorbisFile);
@@ -255,8 +439,16 @@ void TrackPlayer::runTask() {
       CSPOT_LOG(info, "Playing done");
 
       // always move back to LOADING (ensure proper seeking after last track has been loaded)
+      finalStreamPosition = currentTrackStream ? currentTrackStream->getPosition() : 0;
+      finalStreamSize = currentTrackStream ? currentTrackStream->getSize() : 0;
       currentTrackStream = nullptr;
       track->loading = false;
+    }
+
+    if (retryCurrentTrack) {
+      track = nullptr;
+      BELL_SLEEP_MS(retryCurrentTrackFast ? 10 : 250);
+      continue;
     }
 
     if (eof) {
@@ -264,7 +456,8 @@ void TrackPlayer::runTask() {
         endOfQueueReached = true;
       }
 
-      this->eofCallback();
+      this->eofCallback(decodedPlaybackMs, track->trackInfo.duration,
+                        finalStreamPosition, finalStreamSize);
     }
   }
 }
@@ -273,7 +466,39 @@ size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
   if (this->currentTrackStream == nullptr) {
     return 0;
   }
-  return this->currentTrackStream->readBytes((uint8_t*)ptr, nmemb * size);
+
+  size_t requestedBytes = nmemb * size;
+  uint32_t waitStartMs = trackPlayerNowMs();
+  for (int attempt = 0; attempt < 4; attempt++) {
+    size_t bytesRead =
+        this->currentTrackStream->readBytes((uint8_t*)ptr, requestedBytes);
+    if (bytesRead > 0) {
+      uint32_t waitDtMs = trackPlayerNowMs() - waitStartMs;
+      if (waitDtMs >= 50) {
+        CSPOT_LOG(info, "CDN read wait bytes=%u dt=%u attempts=%d",
+                  (unsigned)bytesRead, (unsigned)waitDtMs, attempt + 1);
+      }
+      return bytesRead;
+    }
+
+    size_t streamPosition = this->currentTrackStream->getPosition();
+    size_t streamSize = this->currentTrackStream->getSize();
+    if (streamSize == 0 || streamPosition >= streamSize) {
+      return 0;
+    }
+
+    CSPOT_LOG(error,
+              "CDN read returned no data before EOF, retrying pos=%u size=%u attempt=%d",
+              (unsigned)streamPosition, (unsigned)streamSize, attempt + 1);
+    BELL_SLEEP_MS(40);
+  }
+
+  uint32_t waitDtMs = trackPlayerNowMs() - waitStartMs;
+  if (waitDtMs >= 50) {
+    CSPOT_LOG(info, "CDN read wait bytes=0 dt=%u attempts=4",
+              (unsigned)waitDtMs);
+  }
+  return 0;
 }
 
 size_t TrackPlayer::_vorbisClose() {

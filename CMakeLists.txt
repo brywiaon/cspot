@@ -1,20 +1,25 @@
-cmake_minimum_required(VERSION 2.8.12)
+idf_component_register(
+    SRCS "idf_component_stub.cpp"
+    INCLUDE_DIRS
+        "cspot/include"
+        "cspot/bell/main/io/include"
+        "cspot/bell/main/utilities/include"
+        "cspot/bell/main/audio-sinks/include"
+        "cspot/bell/main/audio-codec/include"
+        "cspot/bell/main/audio-dsp/include"
+)
 
-# Configurable options
-option(CSPOT_TARGET_CLI "Enable cspotcli target" OFF)
-option(CSPOT_TARGET_ESP32 "Enable cspot-esp32 target" OFF)
+set(BUILD_SHARED_LIBS OFF)
+set(BUILD_TESTING OFF)
+set(BELL_DISABLE_SINKS ON CACHE BOOL "" FORCE)
+set(BELL_DISABLE_MQTT ON CACHE BOOL "" FORCE)
+set(BELL_CODEC_AAC OFF CACHE BOOL "" FORCE)
+set(BELL_CODEC_MP3 OFF CACHE BOOL "" FORCE)
+set(BELL_CODEC_ALAC OFF CACHE BOOL "" FORCE)
+set(BELL_CODEC_OPUS OFF CACHE BOOL "" FORCE)
+set(BELL_SINK_ALSA OFF)
+set(BELL_SINK_PORTAUDIO OFF)
 
-# Enable cspotcli target
-if(CSPOT_TARGET_CLI)
-    add_subdirectory(targets/cli)
-    project(cspotcli)
-endif()
-
-# Enable cspot-esp32 target
-if(CSPOT_TARGET_ESP32)
-    include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-    set(IDF_NO_INCLUDE ON)
-    add_subdirectory(targets/esp32)
-    project(cspot-esp32)
-endif()
+add_subdirectory(cspot)
+target_link_libraries(${COMPONENT_LIB} INTERFACE cspot)
 

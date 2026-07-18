@@ -33,18 +33,40 @@ Session::Session() {
 Session::~Session() {}
 
 void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
+  this->shanConn = nullptr;
+  if (!connection || !connection->isConnected()) {
+    CSPOT_LOG(error, "Spotify AP connection unavailable");
+    return;
+  }
+
   this->conn = std::move(connection);
   conn->timeoutHandler = [this]() {
     return this->triggerTimeout();
   };
   auto helloPacket = this->conn->sendPrefixPacket(
       {0x00, 0x04}, this->challenges->prepareClientHello());
+  if (helloPacket.empty() || !this->conn->isConnected()) {
+    CSPOT_LOG(error, "Failed to send Spotify client hello");
+    this->conn->close();
+    return;
+  }
+
   auto apResponse = this->conn->recvPacket();
+  if (apResponse.empty() || !this->conn->isConnected()) {
+    CSPOT_LOG(error, "Failed to receive Spotify AP hello");
+    this->conn->close();
+    return;
+  }
   CSPOT_LOG(info, "Received APHello response");
 
   auto solvedHello = this->challenges->solveApHello(helloPacket, apResponse);
 
-  conn->sendPrefixPacket({}, solvedHello);
+  if (conn->sendPrefixPacket({}, solvedHello).empty() ||
+      !this->conn->isConnected()) {
+    CSPOT_LOG(error, "Failed to send Spotify AP challenge response");
+    this->conn->close();
+    return;
+  }
   CSPOT_LOG(debug, "Received shannon keys");
 
   // Generates the public and priv key
@@ -57,22 +79,39 @@ void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
 
 void Session::connectWithRandomAp() {
   auto apResolver = std::make_unique<ApResolve>("");
-  auto conn = std::make_unique<cspot::PlainConnection>();
-  conn->timeoutHandler = [this]() {
-    return this->triggerTimeout();
-  };
 
   auto apAddr = apResolver->fetchFirstApAddress();
 
-  CSPOT_LOG(debug, "Connecting with AP <%s>", apAddr.c_str());
-  conn->connect(apAddr);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    auto conn = std::make_unique<cspot::PlainConnection>();
+    conn->timeoutHandler = [this]() {
+      return this->triggerTimeout();
+    };
 
-  this->connect(std::move(conn));
+    CSPOT_LOG(debug, "Connecting with AP <%s> attempt %d", apAddr.c_str(),
+              attempt + 1);
+    conn->connect(apAddr);
+    if (!conn->isConnected()) {
+      continue;
+    }
+
+    this->connect(std::move(conn));
+    if (this->shanConn) {
+      return;
+    }
+  }
+
+  CSPOT_LOG(error, "Unable to establish Spotify AP session");
 }
 
 std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
   // save auth blob for reconnection purposes
   authBlob = blob;
+  if (!this->shanConn || !blob) {
+    CSPOT_LOG(error, "Spotify authentication skipped; no AP session");
+    return {};
+  }
+
   // prepare authentication request proto
   auto data = challenges->prepareAuthPacket(blob->authData, blob->authType,
                                             deviceId, blob->username);
@@ -103,5 +142,7 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
 }
 
 void Session::close() {
-  this->conn->close();
+  if (this->conn) {
+    this->conn->close();
+  }
 }

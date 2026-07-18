@@ -2,9 +2,11 @@
 #include <pb_decode.h>
 
 #include <algorithm>
+#include <cctype>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "AccessKeyFetcher.h"
 #include "BellTask.h"
@@ -14,6 +16,9 @@
 #include "Logger.h"
 #include "Utils.h"
 #include "WrappedSemaphore.h"
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
 #ifdef BELL_ONLY_CJSON
 #include "cJSON.h"
 #else
@@ -23,6 +28,116 @@
 #include "protobuf/metadata.pb.h"
 
 using namespace cspot;
+
+namespace {
+#ifdef ESP_PLATFORM
+uint32_t cspotNowMs() {
+  return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+#else
+uint32_t cspotNowMs() {
+  return 0;
+}
+#endif
+
+#ifdef ESP_PLATFORM
+void cspotQueueYield(bool forceDelay = false) {
+  static uint32_t yieldCounter = 0;
+  yieldCounter++;
+  if (forceDelay || (yieldCounter & 0x07) == 0) {
+    vTaskDelay(1);
+  } else {
+    taskYIELD();
+  }
+}
+#else
+void cspotQueueYield(bool forceDelay = false) {
+  (void)forceDelay;
+}
+#endif
+
+void clearQueuedTracksCooperative(std::deque<std::shared_ptr<QueuedTrack>>& queue) {
+  while (!queue.empty()) {
+    queue.pop_front();
+    cspotQueueYield(queue.empty());
+  }
+}
+
+void keepOnlyFirstQueuedTrackCooperative(std::deque<std::shared_ptr<QueuedTrack>>& queue) {
+  while (queue.size() > 1) {
+    queue.pop_back();
+    cspotQueueYield(false);
+  }
+}
+
+std::string spotifyBodyPreview(std::string_view body) {
+  auto previewSize = std::min<size_t>(body.size(), 160);
+  std::string preview(body.substr(0, previewSize));
+  for (auto& character : preview) {
+    unsigned char value = static_cast<unsigned char>(character);
+    if (!std::isprint(value)) {
+      character = '.';
+    }
+  }
+  return preview;
+}
+
+#ifndef BELL_ONLY_CJSON
+bool readSpotifyCdnUrl(const nlohmann::json& jsonResult, std::string& cdnUrl) {
+  if (jsonResult.contains("cdnurl")) {
+    const auto& cdnUrlValue = jsonResult["cdnurl"];
+    if (cdnUrlValue.is_array() && !cdnUrlValue.empty() &&
+        cdnUrlValue[0].is_string()) {
+      cdnUrl = cdnUrlValue[0].get<std::string>();
+      return true;
+    }
+    if (cdnUrlValue.is_string()) {
+      cdnUrl = cdnUrlValue.get<std::string>();
+      return true;
+    }
+  }
+
+  for (const auto* key : {"cdnurls", "urls"}) {
+    if (!jsonResult.contains(key)) {
+      continue;
+    }
+    const auto& urlsValue = jsonResult[key];
+    if (urlsValue.is_array() && !urlsValue.empty() && urlsValue[0].is_string()) {
+      cdnUrl = urlsValue[0].get<std::string>();
+      return true;
+    }
+  }
+
+  return false;
+}
+#endif
+
+bool readSpotifyCdnUrlFromBinary(std::string_view body, std::string& cdnUrl) {
+  constexpr std::string_view urlPrefix = "https://";
+  auto start = body.find(urlPrefix);
+  if (start == std::string_view::npos) {
+    return false;
+  }
+
+  auto end = start;
+  while (end < body.size()) {
+    unsigned char value = static_cast<unsigned char>(body[end]);
+    if (value <= 0x20 || value == '"' || value == '\'' || value == '<' ||
+        value == '>' || value == '\\') {
+      break;
+    }
+    end++;
+  }
+
+  if (end <= start + urlPrefix.size()) {
+    return false;
+  }
+
+  cdnUrl = std::string(body.substr(start, end - start));
+  return true;
+}
+}  // namespace
+
 namespace TrackDataUtils {
 bool countryListContains(char* countryList, const char* country) {
   uint16_t countryList_length = strlen(countryList);
@@ -275,19 +390,23 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     return;
   }
 
-  // Request CDN URL
-  CSPOT_LOG(info, "Received access key, fetching CDN URL...");
+    // Request CDN URL
+    CSPOT_LOG(info, "Received access key, fetching CDN URL...");
 
   try {
+    auto countryCode = ctx->config.countryCode.empty() ? "US" : ctx->config.countryCode;
+    auto salt = static_cast<unsigned>(
+        ctx->timeProvider->getSyncedTimestamp() ^ fileId[0] ^ fileId[fileId.size() - 1]);
 
     std::string requestUrl = string_format(
-        "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/"
-        "%s?alt=json&product=9",
-        bytesToHexString(fileId).c_str());
+        "https://gae2-spclient.spotify.com/storage-resolve/files/audio/"
+        "interactive/%s?product=0&country=%s&salt=%u",
+        bytesToHexString(fileId).c_str(), countryCode.c_str(), salt);
 
     auto req = bell::HTTPClient::get(
-        requestUrl, {bell::HTTPClient::ValueHeader(
-                        {"Authorization", "Bearer " + accessKey})});
+        requestUrl,
+        {bell::HTTPClient::ValueHeader({"Authorization", "Bearer " + accessKey}),
+         bell::HTTPClient::ValueHeader({"Accept-Encoding", "identity"})});
 
     // Wait for response
     std::string_view result = req->body();
@@ -298,8 +417,22 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
                  ->valuestring;
     cJSON_Delete(jsonResult);
 #else
-    auto jsonResult = nlohmann::json::parse(result);
-    cdnUrl = jsonResult["cdnurl"][0];
+    auto jsonResult = nlohmann::json::parse(result, nullptr, false);
+    if ((jsonResult.is_discarded() || !readSpotifyCdnUrl(jsonResult, cdnUrl)) &&
+        !readSpotifyCdnUrlFromBinary(result, cdnUrl)) {
+      auto contentEncoding = std::string(req->header("content-encoding"));
+      auto transferEncoding = std::string(req->header("transfer-encoding"));
+      auto contentType = std::string(req->header("content-type"));
+      CSPOT_LOG(error,
+                "Invalid CDN URL response: status=%d len=%u type=%s encoding=%s "
+                "transfer=%s preview=%s",
+                req->status(), static_cast<unsigned>(result.size()),
+                contentType.c_str(), contentEncoding.c_str(),
+                transferEncoding.c_str(), spotifyBodyPreview(result).c_str());
+      state = State::FAILED;
+      loadedSemaphore->give();
+      return;
+    }
 #endif
 
     CSPOT_LOG(info, "Received CDN URL, %s", cdnUrl.c_str());
@@ -365,7 +498,7 @@ void QueuedTrack::stepLoadMetadata(
 
 TrackQueue::TrackQueue(std::shared_ptr<cspot::Context> ctx,
                        std::shared_ptr<cspot::PlaybackState> state)
-    : bell::Task("CSpotTrackQueue", 1024 * 32, 2, 1),
+    : bell::Task("CSpotTrackQueue", 1024 * 32, 5, 0),
       playbackState(state),
       ctx(ctx) {
   accessKeyFetcher = std::make_shared<cspot::AccessKeyFetcher>(ctx);
@@ -410,9 +543,6 @@ void TrackQueue::runTask() {
   while (isRunning) {
     processSemaphore->twait(100);
 
-    // Make sure we have the newest access key
-    accessKey = accessKeyFetcher->getAccessKey();
-
     int loadedIndex = currentTracksIndex;
 
     // No tracks loaded yet
@@ -421,14 +551,24 @@ void TrackQueue::runTask() {
     } else {
       std::scoped_lock lock(tracksMutex);
 
+      clearQueuedTracksCooperative(trackQueue);
       trackQueue = preloadedTracks;
     }
+
+    if (trackQueue.empty()) {
+      continue;
+    }
+
+    // Make sure we have the newest access key only when local playback needs it.
+    accessKey = accessKeyFetcher->getAccessKey();
 
     for (auto& track : trackQueue) {
       if (track) {
         this->processTrack(track);
+        cspotQueueYield(false);
       }
     }
+    clearQueuedTracksCooperative(trackQueue);
   }
 }
 
@@ -452,7 +592,11 @@ std::shared_ptr<QueuedTrack> TrackQueue::consumeTrack(
   if (prevTrack == nullptr) {
     offset = 0;
 
-    return preloadedTracks[0];
+    if (preloadedTracks.empty()) {
+      queueNextTrack(0);
+    }
+
+    return preloadedTracks.empty() ? nullptr : preloadedTracks[0];
   }
 
   // if (currentTracksIndex + preloadedTracks.size() >= currentTracks.size()) {
@@ -482,6 +626,10 @@ std::shared_ptr<QueuedTrack> TrackQueue::consumeTrack(
 }
 
 void TrackQueue::processTrack(std::shared_ptr<QueuedTrack> track) {
+  if (track && track->loadStartMs == 0) {
+    track->loadStartMs = cspotNowMs();
+  }
+
   switch (track->state) {
     case QueuedTrack::State::QUEUED:
       track->stepLoadMetadata(&pbTrack, &pbEpisode, tracksMutex,
@@ -527,12 +675,15 @@ bool TrackQueue::queueNextTrack(int offset, uint32_t positionMs) {
         currentTracks[requestedRefIndex], ctx, positionMs));
   }
 
+  processSemaphore->give();
+
   return true;
 }
 
 bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
   bool skipped = true;
   std::scoped_lock lock(tracksMutex);
+  int16_t oldIndex = currentTracksIndex;
 
   if (dir == SkipDirection::PREV) {
     uint64_t position =
@@ -555,7 +706,9 @@ bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
     }
   } else {
     if (currentTracks.size() > currentTracksIndex + 1) {
-      preloadedTracks.pop_front();
+      if (!preloadedTracks.empty()) {
+        preloadedTracks.pop_front();
+      }
 
       if (!queueNextTrack(preloadedTracks.size() + 1)) {
         CSPOT_LOG(info, "Failed to queue next track");
@@ -570,11 +723,19 @@ bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
   if (skipped) {
     // Update frame data
     playbackState->innerFrame.state.playing_track_index = currentTracksIndex;
+    CSPOT_LOG(info, "TrackQueue skip dir=%s oldIdx=%d newIdx=%d total=%u expectNotify=%d",
+              dir == SkipDirection::NEXT ? "NEXT" : "PREV",
+              (int)oldIndex, (int)currentTracksIndex,
+              (unsigned)currentTracks.size(), expectNotify ? 1 : 0);
 
     if (expectNotify) {
       // Reset position to zero
       notifyPending = true;
     }
+  } else {
+    CSPOT_LOG(error, "TrackQueue skip rejected dir=%s idx=%d total=%u",
+              dir == SkipDirection::NEXT ? "NEXT" : "PREV",
+              (int)currentTracksIndex, (unsigned)currentTracks.size());
   }
 
   return skipped;
@@ -591,17 +752,30 @@ bool TrackQueue::isFinished() {
   return currentTracksIndex >= currentTracks.size() - 1;
 }
 
+bool TrackQueue::isCurrentTrack(const TrackReference& ref) {
+  std::scoped_lock lock(tracksMutex);
+  if (currentTracksIndex < 0 || currentTracksIndex >= currentTracks.size()) {
+    return false;
+  }
+  return currentTracks[currentTracksIndex] == ref;
+}
+
 bool TrackQueue::updateTracks(uint32_t requestedPosition, bool initial) {
   std::scoped_lock lock(tracksMutex);
   bool cleared = true;
+  int16_t oldIndex = currentTracksIndex;
 
   // Copy requested track list
   currentTracks = playbackState->remoteTracks;
   currentTracksIndex = playbackState->innerFrame.state.playing_track_index;
+  CSPOT_LOG(info,
+            "TrackQueue updateTracks initial=%d oldIdx=%d newIdx=%d total=%u requestedPos=%u",
+            initial ? 1 : 0, (int)oldIndex, (int)currentTracksIndex,
+            (unsigned)currentTracks.size(), (unsigned)requestedPosition);
 
   if (initial) {
     // Clear preloaded tracks
-    preloadedTracks.clear();
+    clearQueuedTracksCooperative(preloadedTracks);
 
     if (currentTracksIndex < currentTracks.size()) {
       // Push a song on the preloaded queue
@@ -612,20 +786,18 @@ bool TrackQueue::updateTracks(uint32_t requestedPosition, bool initial) {
     notifyPending = true;
 
     playableSemaphore->give();
-  } else if (preloadedTracks[0]->loading) {
+  } else if (!preloadedTracks.empty() && preloadedTracks[0]->loading) {
     // try to not re-load track if we are still loading it
 
     // remove everything except first track
-    preloadedTracks.erase(preloadedTracks.begin() + 1, preloadedTracks.end());
+    keepOnlyFirstQueuedTrackCooperative(preloadedTracks);
 
-    // Push a song on the preloaded queue
     CSPOT_LOG(info, "Keeping current track %d", currentTracksIndex);
-    queueNextTrack(1);
 
     cleared = false;
   } else {
     // Clear preloaded tracks
-    preloadedTracks.clear();
+    clearQueuedTracksCooperative(preloadedTracks);
 
     // Push a song on the preloaded queue
     CSPOT_LOG(info, "Re-loading current track");

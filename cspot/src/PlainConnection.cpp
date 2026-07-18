@@ -9,7 +9,6 @@
 #include <sys/socket.h>   // for setsockopt, connect, recv, send, shutdown
 #include <sys/time.h>     // for timeval
 #include <cstring>        // for memset
-#include <stdexcept>      // for runtime_error
 #else
 #include <ws2tcpip.h>
 #endif
@@ -54,6 +53,8 @@ void PlainConnection::connect(const std::string& apAddress) {
   // Lookup host
   if (getaddrinfo(hostname.c_str(), portStr.c_str(), &h, &airoot)) {
     CSPOT_LOG(error, "getaddrinfo failed");
+    apSock = -1;
+    return;
   }
 
   // find the right ai, connect to server
@@ -94,23 +95,42 @@ void PlainConnection::connect(const std::string& apAddress) {
     ::close(this->apSock);
 #endif
     apSock = -1;
-    throw std::runtime_error("Can't connect to spotify servers");
   }
 
   freeaddrinfo(airoot);
-  CSPOT_LOG(debug, "Connected to spotify server");
+  if (apSock >= 0) {
+    CSPOT_LOG(debug, "Connected to spotify server");
+  } else {
+    CSPOT_LOG(error, "Can't connect to spotify servers");
+  }
 }
 
 std::vector<uint8_t> PlainConnection::recvPacket() {
+  if (!isConnected()) {
+    return {};
+  }
+
   // Read packet size
   std::vector<uint8_t> packetBuffer(4);
   readBlock(packetBuffer.data(), 4);
+  if (!isConnected()) {
+    return {};
+  }
+
   uint32_t packetSize = ntohl(extract<uint32_t>(packetBuffer, 0));
+  if (packetSize < 4 || packetSize > 1024 * 1024) {
+    CSPOT_LOG(error, "Invalid plain packet size %u", packetSize);
+    close();
+    return {};
+  }
 
   packetBuffer.resize(packetSize, 0);
 
   // Read actual data
   readBlock(packetBuffer.data() + 4, packetSize - 4);
+  if (!isConnected()) {
+    return {};
+  }
 
   return packetBuffer;
 }
@@ -126,7 +146,9 @@ std::vector<uint8_t> PlainConnection::sendPrefixPacket(
   sizeRaw.insert(sizeRaw.end(), data.begin(), data.end());
 
   // Actually write it to the server
-  writeBlock(sizeRaw);
+  if (writeBlock(sizeRaw) != sizeRaw.size()) {
+    return {};
+  }
 
   return sizeRaw;
 }
@@ -137,6 +159,9 @@ void PlainConnection::readBlock(const uint8_t* dst, size_t size) {
   int retries = 0;
 
   while (idx < size) {
+    if (!isConnected()) {
+      return;
+    }
   READ:
     if ((n = recv(this->apSock, (char*)&dst[idx], size - idx, 0)) <= 0) {
       switch (getErrno()) {
@@ -144,14 +169,17 @@ void PlainConnection::readBlock(const uint8_t* dst, size_t size) {
         case ETIMEDOUT:
           if (timeoutHandler()) {
             CSPOT_LOG(error, "Connection lost, will need to reconnect...");
-            throw std::runtime_error("Reconnection required");
+            close();
+            return;
           }
           goto READ;
         case EINTR:
           break;
         default:
-          if (retries++ > 4)
-            throw std::runtime_error("Error in read");
+          if (retries++ > 4) {
+            close();
+            return;
+          }
           goto READ;
       }
     }
@@ -166,6 +194,9 @@ size_t PlainConnection::writeBlock(const std::vector<uint8_t>& data) {
   int retries = 0;
 
   while (idx < data.size()) {
+    if (!isConnected()) {
+      return idx;
+    }
   WRITE:
     if ((n = send(this->apSock, (char*)&data[idx],
                   data.size() - idx < 64 ? data.size() - idx : 64, 0)) <= 0) {
@@ -173,14 +204,17 @@ size_t PlainConnection::writeBlock(const std::vector<uint8_t>& data) {
         case EAGAIN:
         case ETIMEDOUT:
           if (timeoutHandler()) {
-            throw std::runtime_error("Reconnection required");
+            close();
+            return idx;
           }
           goto WRITE;
         case EINTR:
           break;
         default:
-          if (retries++ > 4)
-            throw std::runtime_error("Error in write");
+          if (retries++ > 4) {
+            close();
+            return idx;
+          }
           goto WRITE;
       }
     }

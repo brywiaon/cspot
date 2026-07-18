@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5)
 
 project(cspot)
 
@@ -32,6 +32,7 @@ add_custom_target(generate_proto_sources DEPENDS ${PROTO_SRCS} ${PROTO_HDRS})
 set_source_files_properties(${PROTO_SRCS} ${PROTO_HDRS} PROPERTIES GENERATED TRUE)
 
 add_library(cspot STATIC ${SOURCES} ${PROTO_SRCS})
+target_compile_options(cspot PRIVATE "-fexceptions")
 # PUBLIC to propagate includes from bell to cspot dependents
 target_compile_definitions(bell PUBLIC PB_ENABLE_MALLOC)
 target_compile_definitions(bell PUBLIC PB_FIELD_32BIT)

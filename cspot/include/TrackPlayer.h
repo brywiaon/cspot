@@ -36,7 +36,7 @@ class TrackPlayer : bell::Task {
       TrackLoadedCallback;
   typedef std::function<size_t(uint8_t*, size_t, std::string_view)>
       DataCallback;
-  typedef std::function<void()> EOFCallback;
+  typedef std::function<void(uint32_t, uint32_t, size_t, size_t)> EOFCallback;
 
   TrackPlayer(std::shared_ptr<cspot::Context> ctx,
               std::shared_ptr<cspot::TrackQueue> trackQueue,
@@ -79,9 +79,11 @@ class TrackPlayer : bell::Task {
   // Vorbis related
   OggVorbis_File vorbisFile;
   ov_callbacks vorbisCallbacks;
+  ov_callbacks vorbisStreamCallbacks;
   int currentSection;
 
-  std::vector<uint8_t> pcmBuffer = std::vector<uint8_t>(1024);
+  std::vector<uint8_t, bell::PsramAllocator<uint8_t>> pcmBuffer =
+      std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(128 * 1024);
 
   bool autoStart = false;
 

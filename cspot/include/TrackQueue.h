@@ -53,6 +53,7 @@ class QueuedTrack {
   TrackInfo trackInfo;  // Full track information fetched from spotify, name etc
 
   uint32_t requestedPosition;
+  uint32_t loadStartMs = 0;
   std::string identifier;
   bool loading = false;
 
@@ -100,6 +101,7 @@ class TrackQueue : public bell::Task {
 
   bool hasTracks();
   bool isFinished();
+  bool isCurrentTrack(const TrackReference& ref);
   bool skipTrack(SkipDirection dir, bool expectNotify = true);
   bool updateTracks(uint32_t requestedPosition = 0, bool initial = false);
   TrackInfo getTrackInfo(std::string_view identifier);
@@ -107,7 +109,7 @@ class TrackQueue : public bell::Task {
       std::shared_ptr<QueuedTrack> prevSong, int& offset);
 
  private:
-  static const int MAX_TRACKS_PRELOAD = 3;
+  static const int MAX_TRACKS_PRELOAD = 4;
 
   std::shared_ptr<cspot::AccessKeyFetcher> accessKeyFetcher;
   std::shared_ptr<PlaybackState> playbackState;

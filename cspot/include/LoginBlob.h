@@ -29,8 +29,8 @@ class LoginBlob {
   int authType;
 
   // Loading
-  void loadZeroconfQuery(std::map<std::string, std::string>& queryParams);
-  void loadZeroconf(const std::vector<uint8_t>& blob,
+  bool loadZeroconfQuery(std::map<std::string, std::string>& queryParams);
+  bool loadZeroconf(const std::vector<uint8_t>& blob,
                     const std::vector<uint8_t>& sharedKey,
                     const std::string& deviceId, const std::string& username);
   void loadUserPass(const std::string& username, const std::string& password);

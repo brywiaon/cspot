@@ -37,6 +37,10 @@ void ShannonConnection::wrapConnection(
 
 void ShannonConnection::sendPacket(uint8_t cmd, std::vector<uint8_t>& data) {
   std::scoped_lock lock(this->writeMutex);
+  if (!this->conn || !this->conn->isConnected()) {
+    return;
+  }
+
   auto rawPacket = this->cipherPacket(cmd, data);
 
   // Shannon encrypt the packet and write it to sock
@@ -57,24 +61,43 @@ void ShannonConnection::sendPacket(uint8_t cmd, std::vector<uint8_t>& data) {
 
 cspot::Packet ShannonConnection::recvPacket() {
   std::scoped_lock lock(this->readMutex);
+  if (!this->conn || !this->conn->isConnected()) {
+    return {};
+  }
 
   std::vector<uint8_t> data(3);
   // Receive 3 bytes, cmd + int16 size
   this->conn->readBlock(data.data(), 3);
+  if (!this->conn->isConnected()) {
+    return {};
+  }
+
   this->recvCipher->decrypt(data);
 
   auto readSize = ntohs(extract<uint16_t>(data, 1));
+  if (readSize > 512 * 1024) {
+    CSPOT_LOG(error, "Invalid shannon packet size %u", readSize);
+    this->conn->close();
+    return {};
+  }
+
   auto packetData = std::vector<uint8_t>(readSize);
 
   // Read and decode if the packet has an actual body
   if (readSize > 0) {
     this->conn->readBlock(packetData.data(), readSize);
+    if (!this->conn->isConnected()) {
+      return {};
+    }
     this->recvCipher->decrypt(packetData);
   }
 
   // Read mac
   std::vector<uint8_t> mac(MAC_SIZE);
   this->conn->readBlock(mac.data(), MAC_SIZE);
+  if (!this->conn->isConnected()) {
+    return {};
+  }
 
   // Generate mac
   std::vector<uint8_t> mac2(MAC_SIZE);

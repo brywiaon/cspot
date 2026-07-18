@@ -1,55 +1,56 @@
 syntax = "proto2";
+import "nanopb.proto";
 
 message AudioFile {
-    optional bytes file_id = 1;
+    optional bytes file_id = 1 [(nanopb).type = FT_POINTER];
     optional AudioFormat format = 2;
 }
 
 message Restriction {
-    optional string countries_allowed = 0x2;
-    optional string countries_forbidden = 0x3;
+    optional string countries_allowed = 0x2 [(nanopb).type = FT_POINTER];
+    optional string countries_forbidden = 0x3 [(nanopb).type = FT_POINTER];
 }
 
 message Image {
-    optional bytes file_id = 0x1;
+    optional bytes file_id = 0x1 [(nanopb).type = FT_POINTER];
 }
 
 message ImageGroup {
-    repeated Image image = 0x1;
+    repeated Image image = 0x1 [(nanopb).type = FT_POINTER];
 }
 
 message Album {
     optional bytes gid = 0x1;
-    optional string name = 0x2;
+    optional string name = 0x2 [(nanopb).type = FT_POINTER];
     optional ImageGroup cover_group = 0x11;
 }
 
 message Artist {
-    optional bytes gid = 0x1;
-    optional string name = 0x2;
+    optional bytes gid = 0x1 [(nanopb).type = FT_POINTER];
+    optional string name = 0x2 [(nanopb).type = FT_POINTER];
 }
 
 message Track {
-    optional bytes gid = 1;
-    optional string name = 2;
+    optional bytes gid = 1 [(nanopb).type = FT_POINTER];
+    optional string name = 2 [(nanopb).type = FT_POINTER];
     optional sint32 number = 5;
     optional sint32 disc_number = 6;
     optional sint32 duration = 0x7;
     optional Album album = 0x3;
-    repeated Artist artist = 0x4;
-    repeated Restriction restriction = 0xb;
-    repeated AudioFile file = 0xc;
-    repeated Track alternative = 0xd;
+    repeated Artist artist = 0x4 [(nanopb).type = FT_POINTER];
+    repeated Restriction restriction = 0xb [(nanopb).type = FT_POINTER];
+    repeated AudioFile file = 0xc [(nanopb).type = FT_POINTER];
+    repeated Track alternative = 0xd [(nanopb).type = FT_POINTER];
 }
 
 message Episode {
-    optional bytes gid = 1;
-    optional string name = 2;
+    optional bytes gid = 1 [(nanopb).type = FT_POINTER];
+    optional string name = 2 [(nanopb).type = FT_POINTER];
     optional sint32 duration = 7;
     optional sint32 number = 65;
-    repeated AudioFile file = 12;
-    repeated Restriction restriction = 0x4B;
-    optional ImageGroup covers = 0x44;
+    repeated AudioFile file = 12 [(nanopb).type = FT_POINTER];
+    repeated Restriction restriction = 0x4B [(nanopb).type = FT_POINTER];
+    optional ImageGroup covers = 0x44 [(nanopb).type = FT_POINTER];
 }
 
 enum AudioFormat {
