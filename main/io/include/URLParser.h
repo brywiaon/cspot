@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdlib>    // for strtol, size_t
-#include <regex>      // for match_results, match_results<>::value_type, sub...
 #include <stdexcept>  // for invalid_argument
 #include <string>     // for string, allocator, operator+, char_traits, oper...
 
@@ -58,43 +57,59 @@ class URLParser {
 
   std::string schema = "http";
   std::string path;
-#ifdef BELL_DISABLE_REGEX
-  void parse(const char* url, std::vector<std::string>& match);
-#else
-  static const std::regex urlParseRegex;
-#endif
 
   static URLParser parse(const std::string& url) {
     URLParser parser;
 
-    // apply parser.urlParseRegex to url
-#ifdef BELL_DISABLE_REGEX
-    std::vector<std::string> match(6);
-    parser.parse(url.c_str(), match);
-#else
-    std::cmatch match;
-    std::regex_match(url.c_str(), match, parser.urlParseRegex);
-#endif
+    const auto schemePos = url.find("://");
+    size_t authorityStart = 0;
+    if (schemePos != std::string::npos) {
+      parser.schema = url.substr(0, schemePos);
+      authorityStart = schemePos + 3;
+    }
 
-    if (match.size() < 3) {
+    const size_t authorityEnd = url.find_first_of("/?#", authorityStart);
+    const std::string authority = url.substr(
+        authorityStart,
+        authorityEnd == std::string::npos ? std::string::npos
+                                          : authorityEnd - authorityStart);
+    if (authority.empty()) {
       throw std::invalid_argument("Invalid URL");
     }
 
-    parser.schema = match[1];
-    parser.host = match[2];
-    parser.path = match[3];
+    const size_t pathStart =
+        authorityEnd == std::string::npos ? url.size() : authorityEnd;
+    const size_t fragmentStart = url.find('#', pathStart);
+    parser.path = url.substr(
+        pathStart, fragmentStart == std::string::npos
+                       ? std::string::npos
+                       : fragmentStart - pathStart);
 
-    if (match[4] != "") {
-      parser.path += match[4];
+    if (!authority.empty() && authority.front() == '[') {
+      const size_t closing = authority.find(']');
+      if (closing == std::string::npos) {
+        throw std::invalid_argument("Invalid URL");
+      }
+      parser.host = authority.substr(1, closing - 1);
+      if (closing + 1 < authority.size()) {
+        if (authority[closing + 1] != ':') {
+          throw std::invalid_argument("Invalid URL");
+        }
+        parser.port = std::stoi(authority.substr(closing + 2));
+      }
+    } else {
+      const size_t colon = authority.rfind(':');
+      if (colon != std::string::npos &&
+          authority.find(':') == colon) {
+        parser.host = authority.substr(0, colon);
+        parser.port = std::stoi(authority.substr(colon + 1));
+      } else {
+        parser.host = authority;
+      }
     }
 
-    // check if parser.host contains ':'
-    if (parser.host.find(':') != std::string::npos) {
-      auto port = std::stoi(
-          parser.host.substr(parser.host.find(':') + 1, parser.host.size()));
-      auto host = parser.host.substr(0, parser.host.find(':'));
-      parser.port = port;
-      parser.host = host;
+    if (parser.host.empty()) {
+      throw std::invalid_argument("Invalid URL");
     }
 
     if (parser.port == -1) {

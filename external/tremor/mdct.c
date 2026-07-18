@@ -37,6 +37,22 @@
 #include "misc.h"
 #include "mdct.h"
 #include "mdct_lookup.h"
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static void mdct_coop_yield(int force_delay){
+  static unsigned int yield_counter=0;
+  yield_counter++;
+  if(force_delay || (yield_counter&0xff)==0){
+    vTaskDelay(1);
+  }else if((yield_counter&0x1f)==0){
+    taskYIELD();
+  }
+}
+#else
+#define mdct_coop_yield(force_delay) ((void)0)
+#endif
 
 STIN void presymmetry(DATA_TYPE *in,int n2,int step){
   DATA_TYPE *aX;
@@ -188,6 +204,7 @@ STIN void mdct_butterfly_generic(DATA_TYPE *x,int points,int step){
     XPROD31( r2, r3, T[0], T[1], &x2[1], &x2[3] ); T+=step;
     x1-=4; 
     x2-=4;
+    mdct_coop_yield(0);
   }while(T<sincos_lookup0+1024);
   do{
     r0 = x1[0] - x1[1]; x1[0] += x1[1];
@@ -198,6 +215,7 @@ STIN void mdct_butterfly_generic(DATA_TYPE *x,int points,int step){
     XNPROD31( r3, r2, T[0], T[1], &x2[1], &x2[3] ); T-=step;
     x1-=4; 
     x2-=4; 
+    mdct_coop_yield(0);
   }while(T>sincos_lookup0);
 }
 
@@ -207,12 +225,16 @@ STIN void mdct_butterflies(DATA_TYPE *x,int points,int shift){
   int i,j;
 
   for(i=0;--stages>0;i++){
-    for(j=0;j<(1<<i);j++)
+    for(j=0;j<(1<<i);j++){
       mdct_butterfly_generic(x+(points>>i)*j,points>>i,4<<(i+shift));
+      mdct_coop_yield(0);
+    }
   }
   
-  for(j=0;j<points;j+=32)
+  for(j=0;j<points;j+=32){
     mdct_butterfly_32(x+j);
+    mdct_coop_yield(0);
+  }
 }
 
 static unsigned char bitrev[16]={0,8,4,12,2,10,6,14,1,9,5,13,3,11,7,15};
@@ -243,6 +265,7 @@ STIN void mdct_bitreverse(DATA_TYPE *x,int n,int shift){
 		 w[1]   = r;
 	       }
   }while(w>x);
+  mdct_coop_yield(0);
 }
 
 STIN void mdct_step7(DATA_TYPE *x,int n,int step){
@@ -269,6 +292,7 @@ STIN void mdct_step7(DATA_TYPE *x,int n,int step){
 	      w1[1]  = r3     - r1;
 
 	      w0    += 2;
+        mdct_coop_yield(0);
   }while(T<Ttop);
   do{
 	      w1    -= 2;
@@ -287,6 +311,7 @@ STIN void mdct_step7(DATA_TYPE *x,int n,int step){
 	      w1[1]  = r3     - r1;
 
 	      w0    += 2;
+        mdct_coop_yield(0);
   }while(w0<w1);
 }
 
@@ -388,10 +413,15 @@ void mdct_backward(int n, DATA_TYPE *in){
   step=2<<shift;
    
   presymmetry(in,n>>1,step);
+  mdct_coop_yield(0);
   mdct_butterflies(in,n>>1,shift);
+  mdct_coop_yield(0);
   mdct_bitreverse(in,n,shift);
+  mdct_coop_yield(0);
   mdct_step7(in,n,step);
+  mdct_coop_yield(0);
   mdct_step8(in,n,step);
+  mdct_coop_yield(1);
 }
 
 void mdct_shift_right(int n, DATA_TYPE *in, DATA_TYPE *right){
@@ -436,6 +466,9 @@ void mdct_unroll_lap(int n0,int n1,
     while(r>post){
       *out = CLIP_TO_15((*--r)>>9);
       out+=step;
+#ifdef ESP_PLATFORM
+      if(((post-r)&0xff)==0)mdct_coop_yield(0);
+#endif
     }
   }
   
@@ -453,6 +486,9 @@ void mdct_unroll_lap(int n0,int n1,
     l-=2;
     *out = CLIP_TO_15((MULT31(*--r,*--wR) + MULT31(*l,*wL++))>>9);
     out+=step;
+#ifdef ESP_PLATFORM
+    if(((post-r)&0xff)==0)mdct_coop_yield(0);
+#endif
   }
 
   n      = (end<halfLap?end:halfLap);
@@ -468,6 +504,9 @@ void mdct_unroll_lap(int n0,int n1,
     *out = CLIP_TO_15((MULT31(*r++,*--wR) - MULT31(*l,*wL++))>>9);
     out+=step;
     l+=2;
+#ifdef ESP_PLATFORM
+    if(((post-r)&0xff)==0)mdct_coop_yield(0);
+#endif
   }
 
   /* preceeding direct-copy lapping from previous frame, if any */
@@ -480,6 +519,9 @@ void mdct_unroll_lap(int n0,int n1,
       *out = CLIP_TO_15((-*l)>>9);
       out+=step;
       l+=2;
+#ifdef ESP_PLATFORM
+      if(((post-l)&0xff)==0)mdct_coop_yield(0);
+#endif
     }
   }
 }

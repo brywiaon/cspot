@@ -4,7 +4,7 @@
 #include <string>  // for string
 #include <vector>  // for vector
 
-#include <mbedtls/aes.h>  // for mbedtls_aes_context
+#include <mbedtls/private/aes.h>  // for mbedtls_aes_context
 #include <mbedtls/md.h>   // for mbedtls_md_context_t
 #include <stddef.h>       // for size_t
 #include <stdint.h>       // for uint8_t
@@ -23,7 +23,7 @@ const static unsigned char DHPrime[] = {
     0xa6, 0x3a, 0x36, 0x20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 class CryptoMbedTLS {
  private:
-  mbedtls_md_context_t sha1Context;
+  std::vector<uint8_t> sha1Buffer;
   mbedtls_aes_context aesCtx;
   bool aesCtxInitialized = false;
 

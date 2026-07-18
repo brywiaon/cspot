@@ -24,6 +24,7 @@ class SocketBuffer : public std::streambuf {
   int open(const std::string& hostname, int port, bool isSSL = false);
 
   int close();
+  void abortNow();
 
   bool isOpen() {
     return internalSocket != nullptr && internalSocket->isOpen();
@@ -65,6 +66,7 @@ class SocketStream : public std::iostream {
   }
 
   int close() { return socketBuf.close(); }
+  void abortNow() { socketBuf.abortNow(); }
 
   bool isOpen() { return socketBuf.isOpen(); }
 };

@@ -12,8 +12,6 @@
 #include <stdlib.h>  // for size_t
 #include <string>    // for string
 
-#include "mbedtls/ctr_drbg.h"     // for mbedtls_ctr_drbg_context
-#include "mbedtls/entropy.h"      // for mbedtls_entropy_context
 #include "mbedtls/net_sockets.h"  // for mbedtls_net_context
 #include "mbedtls/ssl.h"          // for mbedtls_ssl_config, mbedtls_ssl_con...
 
@@ -21,8 +19,6 @@ namespace bell {
 class TLSSocket : public bell::Socket {
  private:
   mbedtls_net_context server_fd;
-  mbedtls_entropy_context entropy;
-  mbedtls_ctr_drbg_context ctr_drbg;
   mbedtls_ssl_context ssl;
   mbedtls_ssl_config conf;
 

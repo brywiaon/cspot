@@ -4,7 +4,6 @@
 #include <cstring>  // for size_t
 #include <memory>   // for unique_ptr
 #include <mutex>    // for mutex
-#include <vector>   // for vector
 
 #include "WrappedSemaphore.h"  // for WrappedSemaphore
 
@@ -15,7 +14,7 @@ class CircularBuffer {
 
   std::unique_ptr<bell::WrappedSemaphore> dataSemaphore;
 
-  size_t size() const { return dataSize; }
+  size_t size() const;
 
   size_t capacity() const { return dataCapacity; }
 
@@ -25,11 +24,11 @@ class CircularBuffer {
   void emptyExcept(size_t size);
 
  private:
-  std::mutex bufferMutex;
+  mutable std::mutex bufferMutex;
   size_t begIndex = 0;
   size_t endIndex = 0;
   size_t dataSize = 0;
   size_t dataCapacity = 0;
-  std::vector<uint8_t> buffer;
+  std::unique_ptr<uint8_t, void (*)(void*)> buffer{nullptr, nullptr};
 };
 }  // namespace bell

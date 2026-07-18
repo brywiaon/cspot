@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <errno.h>
 #include "BellSocket.h"
 #ifdef _WIN32
 #include <winsock2.h>
@@ -61,7 +62,10 @@ class TCPSocket : public bell::Socket {
     sprintf(portStr, "%u", port);
     err = getaddrinfo(host.c_str(), portStr, &hints, &addr);
     if (err != 0) {
-      throw std::runtime_error("Resolve failed");
+      BELL_LOG(error, "http", "Could not resolve %s. Error %d", host.c_str(),
+               err);
+      isClosed = true;
+      return;
     }
 
     sockFd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
@@ -71,7 +75,8 @@ class TCPSocket : public bell::Socket {
       close();
       BELL_LOG(error, "http", "Could not connect to %s. Error %d", host.c_str(),
                errno);
-      throw std::runtime_error("Resolve failed");
+      freeaddrinfo(addr);
+      return;
     }
 
     int flag = 1;
@@ -86,11 +91,13 @@ class TCPSocket : public bell::Socket {
   }
 
   size_t read(uint8_t* buf, size_t len) {
-    return recv(sockFd, (char*)buf, len, 0);
+    int ret = recv(sockFd, (char*)buf, len, 0);
+    return ret > 0 ? (size_t)ret : 0;
   }
 
   size_t write(uint8_t* buf, size_t len) {
-    return send(sockFd, (char*)buf, len, 0);
+    int ret = send(sockFd, (char*)buf, len, 0);
+    return ret > 0 ? (size_t)ret : 0;
   }
 
   size_t poll() {

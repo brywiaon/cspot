@@ -30,6 +30,11 @@ class BellLogger : public bell::AbstractLogger {
   // static bool enableColors = true;
   void debug(std::string filename, int line, std::string submodule,
              const char* format, ...) {
+    (void)filename;
+    (void)line;
+    (void)submodule;
+    (void)format;
+    return;
     printTimestamp();
 
     printf(colorRed);
@@ -142,7 +147,9 @@ void enableTimestampLogging(bool local = false);
 
 #define BELL_LOG(type, ...)                                        \
   do {                                                             \
-    bell::bellGlobalLogger->type(__FILE__, __LINE__, __VA_ARGS__); \
+    if (bell::bellGlobalLogger) {                                  \
+      bell::bellGlobalLogger->type(__FILE__, __LINE__, __VA_ARGS__); \
+    }                                                              \
   } while (0)
 
 #endif

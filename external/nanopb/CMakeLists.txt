@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5)
 
 project(nanopb C)
 
@@ -56,6 +56,7 @@ if(nanopb_BUILD_GENERATOR)
         add_custom_command(
             OUTPUT ${generator_proto_py_file}
             COMMAND ${nanopb_PROTOC_PATH} --python_out=${PROJECT_BINARY_DIR} -I${PROJECT_SOURCE_DIR}/generator/proto ${generator_proto_file}
+            COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/generator/fix_nanopb_pb2.py ${PROJECT_BINARY_DIR}/${generator_proto_py_file}
             DEPENDS ${generator_proto_file}
         )
         add_custom_target("generate_${generator_proto_py_file}" ALL DEPENDS ${generator_proto_py_file})

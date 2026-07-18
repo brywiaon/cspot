@@ -5,6 +5,12 @@
 
 #include "TCPSocket.h"  // for TCPSocket
 #include "TLSSocket.h"  // for TLSSocket
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 using namespace bell;
 
@@ -19,7 +25,7 @@ int SocketBuffer::open(const std::string& hostname, int port, bool isSSL) {
   }
 
   internalSocket->open(hostname, port);
-  return 0;
+  return internalSocket->isOpen() ? 0 : -1;
 }
 
 int SocketBuffer::close() {
@@ -31,7 +37,34 @@ int SocketBuffer::close() {
   return 0;
 }
 
+void SocketBuffer::abortNow() {
+  if (internalSocket == nullptr || !internalSocket->isOpen()) {
+    return;
+  }
+
+  int fd = internalSocket->getFd();
+  if (fd >= 0) {
+    struct linger sl;
+    sl.l_onoff = 1;
+    sl.l_linger = 0;
+#ifdef _WIN32
+    shutdown(fd, SD_BOTH);
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, (const char*)&sl, sizeof(sl));
+#else
+    shutdown(fd, SHUT_RDWR);
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+#endif
+  }
+  internalSocket->close();
+  internalSocket = nullptr;
+  setg(NULL, NULL, NULL);
+  setp(obuf, obuf + bufLen);
+}
+
 int SocketBuffer::sync() {
+  if (internalSocket == nullptr || !internalSocket->isOpen()) {
+    return -1;
+  }
   ssize_t bw, n = pptr() - pbase();
   while (n > 0) {
     bw = internalSocket->write(reinterpret_cast<uint8_t*>(pptr() - n), n);
@@ -47,6 +80,9 @@ int SocketBuffer::sync() {
 }
 
 SocketBuffer::int_type SocketBuffer::underflow() {
+  if (internalSocket == nullptr || !internalSocket->isOpen()) {
+    return traits_type::eof();
+  }
   ssize_t br = internalSocket->read(reinterpret_cast<uint8_t*>(ibuf), bufLen);
   if (br <= 0) {
     setg(NULL, NULL, NULL);
@@ -67,6 +103,9 @@ SocketBuffer::int_type SocketBuffer::overflow(int_type c) {
 }
 
 std::streamsize SocketBuffer::xsgetn(char_type* __s, std::streamsize __n) {
+  if (internalSocket == nullptr || !internalSocket->isOpen()) {
+    return 0;
+  }
   const std::streamsize bn = egptr() - gptr();
   if (__n <= bn) {
     traits_type::copy(__s, gptr(), __n);
@@ -89,6 +128,9 @@ std::streamsize SocketBuffer::xsgetn(char_type* __s, std::streamsize __n) {
 
 std::streamsize SocketBuffer::xsputn(const char_type* __s,
                                      std::streamsize __n) {
+  if (internalSocket == nullptr || !internalSocket->isOpen()) {
+    return 0;
+  }
   if (pptr() + __n <= epptr()) {
     traits_type::copy(pptr(), __s, __n);
     pbump(__n);

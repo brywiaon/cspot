@@ -9,6 +9,7 @@
 #include <utility>      // for pair
 #include <vector>       // for vector
 
+#include "PsramAllocator.h"
 #include "SocketStream.h"  // for SocketStream
 #include "URLParser.h"     // for URLParser
 #ifndef BELL_DISABLE_FMT
@@ -65,7 +66,9 @@ class HTTPClient {
 
     std::string_view header(const std::string& headerName);
     bell::SocketStream& stream() { return this->socketStream; }
+    void abortNow();
 
+    int status() const { return statusCode; }
     size_t contentLength();
     size_t totalLength();
 
@@ -76,12 +79,15 @@ class HTTPClient {
     struct phr_header phResponseHeaders[32];
     const size_t HTTP_BUF_SIZE = 1024;
 
-    std::vector<uint8_t> httpBuffer = std::vector<uint8_t>(HTTP_BUF_SIZE);
-    std::vector<uint8_t> rawBody = std::vector<uint8_t>();
+    std::vector<uint8_t, bell::PsramAllocator<uint8_t>> httpBuffer =
+        std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(HTTP_BUF_SIZE);
+    std::vector<uint8_t, bell::PsramAllocator<uint8_t>> rawBody =
+        std::vector<uint8_t, bell::PsramAllocator<uint8_t>>();
     size_t httpBufferAvailable;
 
     size_t contentSize = 0;
     bool hasContentSize = false;
+    int statusCode = 0;
 
     Headers responseHeaders;
 

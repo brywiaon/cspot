@@ -18,6 +18,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static void tremor_coop_yield(int force_delay){
+  static unsigned int yield_counter=0;
+  yield_counter++;
+  if(force_delay || (yield_counter&0xff)==0){
+    vTaskDelay(1);
+  }else if((yield_counter&0x1f)==0){
+    taskYIELD();
+  }
+}
+#else
+#define tremor_coop_yield(force_delay) ((void)0)
+#endif
 #include "ogg.h"
 #include "ivorbiscodec.h"
 #include "codebook.h"
@@ -553,9 +569,16 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
   ogg_uint32_t chase=0;
   int  read=book->dec_maxlength;
   long lok = oggpack_look(b,read),i;
+#ifdef ESP_PLATFORM
+  tremor_coop_yield(0);
+#endif
   
-  while(lok<0 && read>1)
+  while(lok<0 && read>1){
     lok = oggpack_look(b, --read);
+#ifdef ESP_PLATFORM
+    if((read&0x3f)==0)tremor_coop_yield(1);
+#endif
+  }
 
   if(lok<0){
     oggpack_adv(b,1); /* force eop */
@@ -570,6 +593,9 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
       unsigned char *t=(unsigned char *)book->dec_table;
       for(i=0;i<read;i++){
 	chase=t[chase*2+((lok>>i)&1)];
+#ifdef ESP_PLATFORM
+	if((i&0x3f)==0)tremor_coop_yield(0);
+#endif
 	if(chase&0x80UL)break;
       }
       chase&=0x7fUL;
@@ -581,6 +607,9 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
       for(i=0;i<read;i++){
 	int bit=(lok>>i)&1;
 	int next=t[chase+bit];
+#ifdef ESP_PLATFORM
+	if((i&0x3f)==0)tremor_coop_yield(0);
+#endif
 	if(next&0x80){
 	  chase= (next<<8) | t[chase+bit+1+(!bit || t[chase]&0x80)];
 	  break;
@@ -597,6 +626,9 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
 	/* 16/16 */
 	for(i=0;i<read;i++){
 	  chase=((ogg_uint16_t *)(book->dec_table))[chase*2+((lok>>i)&1)];
+#ifdef ESP_PLATFORM
+	  if((i&0x3f)==0)tremor_coop_yield(0);
+#endif
 	  if(chase&0x8000UL)break;
 	}
 	chase&=0x7fffUL;
@@ -608,6 +640,9 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
 	for(i=0;i<read;i++){
 	  int bit=(lok>>i)&1;
 	  int next=t[chase+bit];
+#ifdef ESP_PLATFORM
+	  if((i&0x3f)==0)tremor_coop_yield(0);
+#endif
 	  if(next&0x8000){
 	    chase= (next<<16) | t[chase+bit+1+(!bit || t[chase]&0x8000)];
 	    break;
@@ -621,6 +656,9 @@ static inline ogg_uint32_t decode_packed_entry_number(codebook *book,
       
       for(i=0;i<read;i++){
 	chase=((ogg_uint32_t *)(book->dec_table))[chase*2+((lok>>i)&1)];
+#ifdef ESP_PLATFORM
+	if((i&0x3f)==0)tremor_coop_yield(0);
+#endif
 	if(chase&0x80000000UL)break;
       }
       chase&=0x7fffffffUL;
@@ -646,6 +684,9 @@ int decode_map(codebook *s, oggpack_buffer *b, ogg_int32_t *v, int point){
   ogg_uint32_t entry = decode_packed_entry_number(s,b);
   int i;
   if(oggpack_eop(b))return(-1);
+#ifdef ESP_PLATFORM
+  tremor_coop_yield(0);
+#endif
 
   /* according to decode type */
   switch(s->dec_type){
@@ -722,6 +763,9 @@ long vorbis_book_decodevs_add(codebook *book,ogg_int32_t *a,
     
     for (j=0;j<step;j++){
       if(decode_map(book,b,v,point))return -1;
+#ifdef ESP_PLATFORM
+      if((j&0x3f)==0)tremor_coop_yield(0);
+#endif
       for(i=0,o=j;i<book->dim;i++,o+=step)
 	a[o]+=v[i];
     }
@@ -738,6 +782,9 @@ long vorbis_book_decodev_add(codebook *book,ogg_int32_t *a,
     
     for(i=0;i<n;){
       if(decode_map(book,b,v,point))return -1;
+#ifdef ESP_PLATFORM
+      if((i&0x7f)==0)tremor_coop_yield(0);
+#endif
       for (j=0;i<n && j<book->dim;j++)
 	a[i++]+=v[j];
     }
@@ -756,6 +803,9 @@ long vorbis_book_decodev_set(codebook *book,ogg_int32_t *a,
     
     for(i=0;i<n;){
       if(decode_map(book,b,v,point))return -1;
+#ifdef ESP_PLATFORM
+      if((i&0x7f)==0)tremor_coop_yield(0);
+#endif
       for (j=0;i<n && j<book->dim;j++)
 	a[i++]=v[j];
     }
@@ -780,6 +830,7 @@ long vorbis_book_decodevv_add(codebook *book,ogg_int32_t **a,
     long i,j;
     int chptr=0;
     long m=offset+n;
+    long last_yield_i=offset;
     
     for(i=offset;i<m;){
       if(decode_map(book,b,v,point))return -1;
@@ -790,6 +841,12 @@ long vorbis_book_decodevv_add(codebook *book,ogg_int32_t **a,
 	  i++;
 	}
       }
+#ifdef ESP_PLATFORM
+      if(i-last_yield_i>=128){
+	last_yield_i=i;
+	tremor_coop_yield(1);
+      }
+#endif
     }
   }
 

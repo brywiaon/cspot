@@ -24,6 +24,22 @@
 #include "codebook.h"
 #include "misc.h"
 #include "os.h"
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static void res_coop_yield(int force_delay){
+  static unsigned int yield_counter=0;
+  yield_counter++;
+  if(force_delay || (yield_counter&0xff)==0){
+    vTaskDelay(1);
+  }else if((yield_counter&0x1f)==0){
+    taskYIELD();
+  }
+}
+#else
+#define res_coop_yield(force_delay) ((void)0)
+#endif
 
 void res_clear_info(vorbis_info_residue *info){
   if(info){
@@ -112,8 +128,10 @@ int res_inverse(vorbis_dsp_state *vd,vorbis_info_residue *info,
 				     sizeof(*partword[j]));
 	
 	for(s=0;s<info->stages;s++){
+	  res_coop_yield(0);
 	  
 	  for(i=0;i<partvals;){
+	    res_coop_yield(0);
 	    if(s==0){
 	      /* fetch the partition word for each channel */
 	      
@@ -143,6 +161,7 @@ int res_inverse(vorbis_dsp_state *vd,vorbis_info_residue *info,
 	    /* now we decode residual values for the partitions */
 	    for(k=0;k<partitions_per_word && i<partvals;k++,i++)
 	      for(j=0;j<ch;j++){
+		res_coop_yield(0);
 		long offset=info->begin+i*samples_per_partition;
 		if(info->stagemasks[(int)partword[j][i]]&(1<<s)){
 		  codebook *stagebook=ci->book_param+
@@ -181,7 +200,9 @@ int res_inverse(vorbis_dsp_state *vd,vorbis_info_residue *info,
       samples_per_partition/=ch;
       
       for(s=0;s<info->stages;s++){
+	res_coop_yield(0);
 	for(i=0;i<partvals;){
+	  res_coop_yield(0);
 	  
 	  if(s==0){
 	    int temp;
@@ -205,6 +226,7 @@ int res_inverse(vorbis_dsp_state *vd,vorbis_info_residue *info,
 	  /* now we decode residual values for the partitions */
 	  for(k=0;k<partitions_per_word && i<partvals;k++,i++)
 	    if(info->stagemasks[(int)partword[i]]&(1<<s)){
+	      res_coop_yield(0);
 	      codebook *stagebook=ci->book_param+
 		info->stagebooks[(partword[i]<<3)+s];
 	      if(vorbis_book_decodevv_add(stagebook,in,

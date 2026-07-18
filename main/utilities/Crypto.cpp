@@ -1,10 +1,10 @@
 #include "Crypto.h"
 
 #include <mbedtls/base64.h>    // for mbedtls_base64_encode, mbedtls_base64_...
-#include <mbedtls/bignum.h>    // for mbedtls_mpi_free, mbedtls_mpi_init
-#include <mbedtls/ctr_drbg.h>  // for mbedtls_ctr_drbg_free, mbedtls_ctr_drb...
-#include <mbedtls/entropy.h>   // for mbedtls_entropy_free, mbedtls_entropy_...
-#include <mbedtls/pkcs5.h>     // for mbedtls_pkcs5_pbkdf2_hmac
+#include <mbedtls/build_info.h>
+#include <mbedtls/private/bignum.h>    // for mbedtls_mpi_free, mbedtls_mpi_init
+#include <mbedtls/private/pkcs5.h>     // for mbedtls_pkcs5_pbkdf2_hmac
+#include <psa/crypto.h>
 #include <cstdint>             // for uint8_t
 #include <stdexcept>           // for runtime_error
 
@@ -53,24 +53,27 @@ std::string CryptoMbedTLS::base64Encode(const std::vector<uint8_t>& data) {
 
 // Sha1
 void CryptoMbedTLS::sha1Init() {
-  // Init mbedtls md context, pick sha1
-  mbedtls_md_init(&sha1Context);
-  mbedtls_md_setup(&sha1Context, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
-  mbedtls_md_starts(&sha1Context);
+  sha1Buffer.clear();
 }
 
 void CryptoMbedTLS::sha1Update(const std::string& s) {
   sha1Update(std::vector<uint8_t>(s.begin(), s.end()));
 }
 void CryptoMbedTLS::sha1Update(const std::vector<uint8_t>& vec) {
-  mbedtls_md_update(&sha1Context, vec.data(), vec.size());
+  sha1Buffer.insert(sha1Buffer.end(), vec.begin(), vec.end());
 }
 
 std::vector<uint8_t> CryptoMbedTLS::sha1FinalBytes() {
   std::vector<uint8_t> digest(20);  // SHA1 digest size
 
-  mbedtls_md_finish(&sha1Context, digest.data());
-  mbedtls_md_free(&sha1Context);
+  size_t hashLen = 0;
+  if (psa_crypto_init() != PSA_SUCCESS ||
+      psa_hash_compute(PSA_ALG_SHA_1, sha1Buffer.data(), sha1Buffer.size(),
+                       digest.data(), digest.size(), &hashLen) != PSA_SUCCESS ||
+      hashLen != digest.size()) {
+    throw std::runtime_error("Failed to compute SHA1");
+  }
+  sha1Buffer.clear();
 
   return digest;
 }
@@ -85,11 +88,48 @@ std::vector<uint8_t> CryptoMbedTLS::sha1HMAC(
     const std::vector<uint8_t>& inputKey, const std::vector<uint8_t>& message) {
   std::vector<uint8_t> digest(20);  // SHA1 digest size
 
-  sha1Init();
-  mbedtls_md_hmac_starts(&sha1Context, inputKey.data(), inputKey.size());
-  mbedtls_md_hmac_update(&sha1Context, message.data(), message.size());
-  mbedtls_md_hmac_finish(&sha1Context, digest.data());
-  mbedtls_md_free(&sha1Context);
+  std::vector<uint8_t> key = inputKey;
+  if (key.size() > 64) {
+    size_t hashLen = 0;
+    std::vector<uint8_t> hashedKey(20);
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_compute(PSA_ALG_SHA_1, key.data(), key.size(),
+                         hashedKey.data(), hashedKey.size(),
+                         &hashLen) != PSA_SUCCESS ||
+        hashLen != hashedKey.size()) {
+      throw std::runtime_error("Failed to compute SHA1 HMAC key");
+    }
+    key = hashedKey;
+  }
+
+  key.resize(64, 0);
+  std::vector<uint8_t> innerPad(64);
+  std::vector<uint8_t> outerPad(64);
+  for (size_t i = 0; i < key.size(); i++) {
+    innerPad[i] = key[i] ^ 0x36;
+    outerPad[i] = key[i] ^ 0x5c;
+  }
+
+  std::vector<uint8_t> innerMessage = innerPad;
+  innerMessage.insert(innerMessage.end(), message.begin(), message.end());
+  std::vector<uint8_t> innerDigest(20);
+  size_t hashLen = 0;
+  if (psa_crypto_init() != PSA_SUCCESS ||
+      psa_hash_compute(PSA_ALG_SHA_1, innerMessage.data(), innerMessage.size(),
+                       innerDigest.data(), innerDigest.size(),
+                       &hashLen) != PSA_SUCCESS ||
+      hashLen != innerDigest.size()) {
+    throw std::runtime_error("Failed to compute SHA1 HMAC inner");
+  }
+
+  std::vector<uint8_t> outerMessage = outerPad;
+  outerMessage.insert(outerMessage.end(), innerDigest.begin(),
+                      innerDigest.end());
+  if (psa_hash_compute(PSA_ALG_SHA_1, outerMessage.data(), outerMessage.size(),
+                       digest.data(), digest.size(), &hashLen) != PSA_SUCCESS ||
+      hashLen != digest.size()) {
+    throw std::runtime_error("Failed to compute SHA1 HMAC outer");
+  }
 
   return digest;
 }
@@ -138,12 +178,15 @@ std::vector<uint8_t> CryptoMbedTLS::pbkdf2HmacSha1(
 #if MBEDTLS_VERSION_NUMBER < 0x03030000
   // Init sha context
   sha1Init();
-  mbedtls_pkcs5_pbkdf2_hmac(&sha1Context, password.data(), password.size(),
+  mbedtls_md_context_t mdContext;
+  mbedtls_md_init(&mdContext);
+  mbedtls_md_setup(&mdContext, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
+  mbedtls_pkcs5_pbkdf2_hmac(&mdContext, password.data(), password.size(),
                             salt.data(), salt.size(), iterations, digestSize,
                             digest.data());
 
   // Free sha context
-  mbedtls_md_free(&sha1Context);
+  mbedtls_md_free(&mdContext);
 #else
   mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA1, password.data(),
                                 password.size(), salt.data(), salt.size(),
@@ -215,25 +258,15 @@ std::vector<uint8_t> CryptoMbedTLS::dhCalculateShared(
 std::vector<uint8_t> CryptoMbedTLS::generateVectorWithRandomData(
     size_t length) {
   std::vector<uint8_t> randomVector(length);
-  mbedtls_entropy_context entropy;
-  mbedtls_ctr_drbg_context ctrDrbg;
-  // Personification string
-  const char* pers = "cspotGen";
+  psa_status_t status = psa_crypto_init();
+  if (status != PSA_SUCCESS) {
+    throw std::runtime_error("Failed to initialize PSA crypto");
+  }
 
-  // init entropy and random num generator
-  mbedtls_entropy_init(&entropy);
-  mbedtls_ctr_drbg_init(&ctrDrbg);
-
-  // Seed the generator
-  mbedtls_ctr_drbg_seed(&ctrDrbg, mbedtls_entropy_func, &entropy,
-                        (const unsigned char*)pers, 7);
-
-  // Generate random bytes
-  mbedtls_ctr_drbg_random(&ctrDrbg, randomVector.data(), length);
-
-  // Release memory
-  mbedtls_entropy_free(&entropy);
-  mbedtls_ctr_drbg_free(&ctrDrbg);
+  status = psa_generate_random(randomVector.data(), randomVector.size());
+  if (status != PSA_SUCCESS) {
+    throw std::runtime_error("Failed to generate random data");
+  }
 
   return randomVector;
 }

@@ -25,4 +25,6 @@ if __name__ == '__main__':
          args = ['--plugin=protoc-gen-nanopb=%s' % protoc_gen_nanopb] + args
 
     status = invoke_protoc(['protoc'] + args)
+    if status != 0:
+        sys.stderr.write("nanopb protoc wrapper failed command: %s\n" % (' '.join(['protoc'] + args)))
     sys.exit(status)

@@ -395,7 +395,7 @@ CivetServer::CivetServer(const char **options,
                          const void *UserContextIn)
     : context(0)
 {
-	struct CivetCallbacks callbacks;
+	struct CivetCallbacks callbacks = {};
 
 	UserContext = UserContextIn;
 
@@ -435,7 +435,7 @@ CivetServer::CivetServer(const std::vector<std::string> &options,
                          const void *UserContextIn)
     : context(0)
 {
-	struct CivetCallbacks callbacks;
+	struct CivetCallbacks callbacks = {};
 
 	UserContext = UserContextIn;
 

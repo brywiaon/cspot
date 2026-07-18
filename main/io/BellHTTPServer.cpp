@@ -4,7 +4,6 @@
 #include <cassert>    // for assert
 #include <exception>  // for exception
 #include <mutex>      // for scoped_lock
-#include <regex>      // for sregex_token_iterator, regex
 
 #include "BellLogger.h"   // for AbstractLogger, BELL_LOG, bell
 #include "CivetServer.h"  // for CivetServer, CivetWebSocketHandler
@@ -25,9 +24,10 @@ class WebSocketHandler : public CivetWebSocketHandler {
     this->stateHandler = stateHandler;
   }
 
-  virtual bool handleConnection(CivetServer* server,
-                                struct mg_connection* conn) {
-    this->stateHandler(conn, BellHTTPServer::WSState::CONNECTED);
+  bool handleConnection(CivetServer* server,
+                        const struct mg_connection* conn) override {
+    this->stateHandler(const_cast<struct mg_connection*>(conn),
+                       BellHTTPServer::WSState::CONNECTED);
     return true;
   }
 
@@ -36,8 +36,8 @@ class WebSocketHandler : public CivetWebSocketHandler {
     this->stateHandler(conn, BellHTTPServer::WSState::READY);
   }
 
-  virtual bool handleData(CivetServer* server, struct mg_connection* conn,
-                          int flags, char* data, size_t data_len) {
+  bool handleData(CivetServer* server, struct mg_connection* conn, int flags,
+                  char* data, size_t data_len) override {
 
     if ((flags & 0xf) == MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE) {
       // Received close message from client. Close the connection.
@@ -49,16 +49,35 @@ class WebSocketHandler : public CivetWebSocketHandler {
     return true;
   }
 
-  virtual void handleClose(CivetServer* server, struct mg_connection* conn) {
-    stateHandler(conn, BellHTTPServer::WSState::CLOSED);
+  void handleClose(CivetServer* server,
+                   const struct mg_connection* conn) override {
+    stateHandler(const_cast<struct mg_connection*>(conn),
+                 BellHTTPServer::WSState::CLOSED);
   }
 };
 
 std::vector<std::string> BellHTTPServer::Router::split(
     const std::string str, const std::string regex_str) {
-  std::regex regexz(regex_str);
-  return {std::sregex_token_iterator(str.begin(), str.end(), regexz, -1),
-          std::sregex_token_iterator()};
+  std::vector<std::string> parts;
+  size_t start = 0;
+
+  while (start <= str.size()) {
+    size_t end = str.find_first_of(regex_str, start);
+    if (end == std::string::npos) {
+      end = str.size();
+    }
+
+    if (end > start) {
+      parts.emplace_back(str.substr(start, end - start));
+    }
+
+    if (end == str.size()) {
+      break;
+    }
+    start = end + 1;
+  }
+
+  return parts;
 }
 
 void BellHTTPServer::Router::insert(const std::string& route,
@@ -136,7 +155,9 @@ bool BellHTTPServer::handleGet(CivetServer* server,
 
   mg_set_user_connection_data(conn, &handler.second);
 
+  #if defined(__cpp_exceptions)
   try {
+  #endif
     auto reply = handler.first(conn);
     if (reply->body == nullptr) {
       return true;
@@ -150,10 +171,12 @@ bool BellHTTPServer::handleGet(CivetServer* server,
     mg_write(conn, reply->body, reply->bodySize);
 
     return true;
-  } catch (std::exception& e) {
+  #if defined(__cpp_exceptions)
+  } catch (const std::exception& e) {
     BELL_LOG(error, "HttpServer", "Exception occured in handler: %s", e.what());
     return false;
   }
+  #endif
 }
 
 bool BellHTTPServer::handlePost(CivetServer* server,
@@ -168,7 +191,9 @@ bool BellHTTPServer::handlePost(CivetServer* server,
 
   mg_set_user_connection_data(conn, &handler.second);
 
+  #if defined(__cpp_exceptions)
   try {
+  #endif
     auto reply = handler.first(conn);
     if (reply->body == nullptr) {
       return true;
@@ -182,18 +207,20 @@ bool BellHTTPServer::handlePost(CivetServer* server,
     mg_write(conn, reply->body, reply->bodySize);
 
     return true;
-  } catch (std::exception& e) {
+  #if defined(__cpp_exceptions)
+  } catch (const std::exception& e) {
     BELL_LOG(error, "HttpServer", "Exception occured in handler: %s", e.what());
     return false;
   }
+  #endif
 }
 
 BellHTTPServer::BellHTTPServer(int serverPort) {
   std::lock_guard lock(initMutex);
   mg_init_library(0);
-  BELL_LOG(info, "HttpServer", "Server listening on port %d", serverPort);
   this->serverPort = serverPort;
-  auto port = std::to_string(this->serverPort);
+  char port[8];
+  snprintf(port, sizeof(port), "%d", this->serverPort);
 
   civetWebOptions.push_back("listening_ports");
   civetWebOptions.push_back(port);

@@ -64,7 +64,9 @@
 #define _XOPEN_SOURCE 600 /* For flockfile() on Linux */
 #endif
 #if defined(__LSB_VERSION__) || defined(__sun)
+#if !defined(ESP_PLATFORM)
 #define NEED_TIMEGM
+#endif
 #define NO_THREAD_NAME
 #endif
 #if !defined(_LARGEFILE_SOURCE)
@@ -207,7 +209,9 @@ mg_static_assert(sizeof(void *) >= sizeof(int), "data type size check");
 #include <freertos/timers.h>
 #include <freertos/task.h>
 
+#if !defined(ESP_PLATFORM)
 #define NEED_TIMEGM
+#endif
 
 #define NI_NUMERICHOST    (1)
 #define EAI_OVERFLOW 14
@@ -5822,16 +5826,27 @@ mg_start_thread(mg_thread_func_t func, void *param)
 	int result;
 
 #if defined(ESP_PLATFORM)
-  thread_id.stack_size = (HTTP_ESP_STACK + sizeof(StackType_t) - 1) / sizeof(StackType_t);
-  thread_id.task_buffer = (StaticTask_t*) heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); 
-  thread_id.x_stack = (StackType_t*) heap_caps_malloc(thread_id.stack_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  thread_id.param = param;
-  thread_id.entry_func = func;
-  thread_id.task_handle = xTaskCreateStaticPinnedToCore(freeRTOSTaskEntryFunc, "civetweb", thread_id.stack_size, &thread_id,
-                  CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT, thread_id.x_stack, thread_id.task_buffer, 1);
-  if (thread_id.task_handle != NULL) {
+  cw_thread_handle_t *thread_param = (cw_thread_handle_t*) heap_caps_calloc(1, sizeof(cw_thread_handle_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (thread_param == NULL) {
+    return -1;
+  }
+  thread_param->stack_size = (HTTP_ESP_STACK + sizeof(StackType_t) - 1) / sizeof(StackType_t);
+  thread_param->task_buffer = (StaticTask_t*) heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); 
+  thread_param->x_stack = (StackType_t*) heap_caps_malloc(thread_param->stack_size * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  thread_param->param = param;
+  thread_param->entry_func = func;
+  thread_param->task_handle = xTaskCreateStaticPinnedToCore(freeRTOSTaskEntryFunc, "civetweb", thread_param->stack_size, thread_param,
+                  CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT, thread_param->x_stack, thread_param->task_buffer, 1);
+  if (thread_param->task_handle != NULL) {
     result = 0;
   } else {
+    if (thread_param->x_stack) {
+      heap_caps_free(thread_param->x_stack);
+    }
+    if (thread_param->task_buffer) {
+      heap_caps_free(thread_param->task_buffer);
+    }
+    heap_caps_free(thread_param);
     result = -1;
   }
 
@@ -5871,15 +5886,22 @@ mg_start_thread_with_id(mg_thread_func_t func,
 
   thread_id.stack_size = (HTTP_ESP_STACK + sizeof(StackType_t) - 1) / sizeof(StackType_t);
   thread_id.task_buffer = (StaticTask_t*) heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); 
-  thread_id.x_stack = (StackType_t*) heap_caps_malloc(thread_id.stack_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  thread_id.x_stack = (StackType_t*) heap_caps_malloc(thread_id.stack_size * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   thread_id.param = param;
   thread_id.entry_func = func;
-  thread_id.task_handle = xTaskCreateStaticPinnedToCore(freeRTOSTaskEntryFunc, "civetweb", thread_id.stack_size, &thread_id,
-                  CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT, thread_id.x_stack, thread_id.task_buffer, 1);
-  if (thread_id.task_handle != NULL) {
+  *threadidptr = thread_id;
+  threadidptr->task_handle = xTaskCreateStaticPinnedToCore(freeRTOSTaskEntryFunc, "civetweb", threadidptr->stack_size, threadidptr,
+                  CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT, threadidptr->x_stack, threadidptr->task_buffer, 1);
+  if (threadidptr->task_handle != NULL) {
     result = 0;
-		*threadidptr = thread_id;
   } else {
+    if (threadidptr->x_stack) {
+      heap_caps_free(threadidptr->x_stack);
+    }
+    if (threadidptr->task_buffer) {
+      heap_caps_free(threadidptr->task_buffer);
+    }
+    memset(threadidptr, 0, sizeof(*threadidptr));
     result = -1;
   }
 #else

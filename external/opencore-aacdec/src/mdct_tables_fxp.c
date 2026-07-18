@@ -78,7 +78,7 @@ extern "C"
 
 
 
-    extern const Int32 exp_rotation_N_256[64] =
+    const Int32 exp_rotation_N_256[64] =
     {
 
         0x5A820047,  0x5A7A0280, 0x5A6304B8, 0x5A3E06EF,
@@ -104,7 +104,7 @@ extern "C"
 
 
 
-    extern const Int32 exp_rotation_N_2048[512] =
+    const Int32 exp_rotation_N_2048[512] =
     {
 
         0x5A820009,  0x5A820050, 0x5A820097, 0x5A8100DE,

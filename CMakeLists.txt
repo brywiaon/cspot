@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5)
 cmake_policy(SET CMP0077 NEW)
 
 project(bell)
@@ -106,7 +106,10 @@ list(APPEND EXTRA_INCLUDES "main/platform")
 
 # Add platform specific sources
 if(ESP_PLATFORM)
-    file(GLOB ESP_PLATFORM_SOURCES "main/platform/esp/*.cpp" "main/platform/esp/*.c" "main/asm/biquad_f32_ae32.S")
+    file(GLOB ESP_PLATFORM_SOURCES "main/platform/esp/*.cpp" "main/platform/esp/*.c")
+    if(IDF_TARGET MATCHES "^esp32$|^esp32s2$|^esp32s3$")
+        list(APPEND ESP_PLATFORM_SOURCES "main/asm/biquad_f32_ae32.S")
+    endif()
     list(APPEND SOURCES ${ESP_PLATFORM_SOURCES})
 endif()
 
@@ -121,7 +124,7 @@ if(UNIX AND NOT APPLE)
     list(APPEND SOURCES ${LINUX_PLATFORM_SOURCES})
 endif()
 
-if(WIN32)
+if(WIN32 AND NOT ESP_PLATFORM)
     file(GLOB WIN32_PLATFORM_SOURCES "main/platform/win32/*.cpp" "main/platform/win32/*.c")
     list(APPEND SOURCES ${WIN32_PLATFORM_SOURCES})
     list(APPEND EXTERNAL_INCLUDES "main/platform/win32")
@@ -161,6 +164,10 @@ if (NOT BELL_DISABLE_MQTT)
     list(APPEND EXTRA_INCLUDES "external/mqtt/include")
 else()
     list(REMOVE_ITEM SOURCES "${IO_DIR}/BellMQTTClient.cpp")
+endif()
+
+if(NOT BELL_CODEC_MP3)
+    list(REMOVE_ITEM SOURCES "${IO_DIR}/EncodedAudioStream.cpp")
 endif()
 
 if(NOT BELL_DISABLE_CODECS)
@@ -223,7 +230,7 @@ if(NOT BELL_DISABLE_CODECS)
         set(MESSAGE_QUIET ON)
         add_subdirectory("external/opus")
         unset(MESSAGE_QUIET)
-        target_compile_options(opus PRIVATE "-O3")
+        target_compile_options(opus PRIVATE "-O3" "-Wno-error=unused-const-variable" "-Wno-error=maybe-uninitialized")
         list(APPEND EXTRA_LIBS Opus::opus)
         list(APPEND SOURCES "${AUDIO_CODEC_DIR}/OPUSDecoder.cpp")
         list(APPEND CODEC_FLAGS -DBELL_CODEC_OPUS)
@@ -278,6 +285,22 @@ if(NOT BELL_DISABLE_SINKS)
     list(APPEND SOURCES ${SINK_SOURCES})
 endif()
 
+if(NOT BELL_CODEC_AAC)
+    list(REMOVE_ITEM SOURCES "${AUDIO_CODEC_DIR}/AACDecoder.cpp")
+    list(REMOVE_ITEM SOURCES "${AUDIO_CONTAINERS_DIR}/ADTSContainer.cpp")
+endif()
+if(NOT BELL_CODEC_MP3)
+    list(REMOVE_ITEM SOURCES "${AUDIO_CODEC_DIR}/MP3Decoder.cpp")
+    list(REMOVE_ITEM SOURCES "${AUDIO_CODEC_DIR}/DecoderGlobals.cpp")
+    list(REMOVE_ITEM SOURCES "${AUDIO_CONTAINERS_DIR}/MP3Container.cpp")
+endif()
+if(NOT BELL_CODEC_ALAC)
+    list(REMOVE_ITEM SOURCES "${AUDIO_CODEC_DIR}/ALACDecoder.cpp")
+endif()
+if(NOT BELL_CODEC_OPUS)
+    list(REMOVE_ITEM SOURCES "${AUDIO_CODEC_DIR}/OPUSDecoder.cpp")
+endif()
+
 if(NOT BELL_ONLY_CJSON)
     set(JSON_SystemInclude ON CACHE INTERNAL "")
     add_subdirectory(external/nlohmann_json)
@@ -298,6 +321,11 @@ endif()
 if(WIN32 OR UNIX)
     list(APPEND SOURCES "external/mdnssvc/mdns.c" "external/mdnssvc/mdnsd.c")
     list(APPEND EXTERNAL_INCLUDES "external/mdnssvc")
+    set_source_files_properties(
+        "external/mdnssvc/mdns.c"
+        "external/mdnssvc/mdnsd.c"
+        PROPERTIES COMPILE_FLAGS "-Wno-error=stringop-truncation -Wno-stringop-truncation"
+    )
 endif() 
 
 if(NOT BELL_DISABLE_WEBSERVER)
@@ -310,6 +338,18 @@ else()
 endif()    
 
 add_library(bell STATIC ${SOURCES})
+target_compile_options(bell PRIVATE
+    "-fexceptions"
+    "-Wno-error=maybe-uninitialized"
+    "-Wno-error=misleading-indentation"
+    "-Wno-error=shift-negative-value"
+    "-Wno-error=implicit-fallthrough"
+    "-Wno-error=missing-field-initializers"
+    "-Wno-error=char-subscripts"
+    "-Wno-error=type-limits"
+    "-Wno-error=unused-label"
+    "-Wno-error=unused-variable"
+  )
 
 # Add Apple Bonjour compatibility library for Linux
 if(UNIX AND NOT APPLE)
@@ -325,6 +365,7 @@ target_link_libraries(bell PUBLIC ${EXTRA_LIBS})
 target_include_directories(bell PUBLIC ${EXTRA_INCLUDES} ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(bell SYSTEM PUBLIC ${EXTERNAL_INCLUDES})
 target_compile_definitions(bell PUBLIC PB_ENABLE_MALLOC FMT_HEADER_ONLY)
+target_compile_definitions(bell PRIVATE MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS)
 
 if(BELL_DISABLE_CODECS)
     target_compile_definitions(bell PUBLIC BELL_DISABLE_CODECS)

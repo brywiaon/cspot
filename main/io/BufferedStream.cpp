@@ -4,7 +4,13 @@
 #include <algorithm>    // for min
 #include <cstdint>      // for uint32_t
 #include <cstring>      // for memcpy
+#include <thread>       // for yield
 #include <type_traits>  // for remove_extent_t
+
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 
 BufferedStream::BufferedStream(const std::string& taskName, uint32_t bufferSize,
                                uint32_t readThreshold, uint32_t readSize,
@@ -100,6 +106,11 @@ uint32_t BufferedStream::lengthBetween(uint8_t* me, uint8_t* other) {
 size_t BufferedStream::read(uint8_t* dst, size_t len) {
   if (waitForReady && isNotReady()) {
     while ((source || reader) && !isReady()) {
+#ifdef ESP_PLATFORM
+      taskYIELD();
+#else
+      std::this_thread::yield();
+#endif
     }  // end waiting after termination
   }
   if (!running && !readAvailable) {
@@ -162,6 +173,11 @@ void BufferedStream::runTask() {
       bufWritePtr += len;
       if (bufWritePtr >= bufEnd)  // TODO is == enough here?
         bufWritePtr = buf;
+#ifdef ESP_PLATFORM
+      if (len) {
+        taskYIELD();
+      }
+#endif
     } while (
         len &&
         readSize <

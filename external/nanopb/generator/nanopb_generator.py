@@ -14,6 +14,7 @@ import itertools
 import tempfile
 import shutil
 import os
+import traceback
 from functools import reduce
 
 try:
@@ -78,6 +79,7 @@ except:
          *** You have to run 'make' in the nanopb/generator/proto folder. ***
          ********************************************************************
     ''' + '\n')
+    traceback.print_exc(file=sys.stderr)
     raise
 
 try:
@@ -2329,24 +2331,30 @@ def main_plugin():
     import os.path
     options.options_path.append(os.path.dirname(request.file_to_generate[0]))
 
-    # Process any include files first, in order to have them
-    # available as dependencies
-    other_files = {}
-    for fdesc in request.proto_file:
-        other_files[fdesc.name] = parse_file(fdesc.name, fdesc, options)
-
-    for filename in request.file_to_generate:
+    try:
+        # Process any include files first, in order to have them
+        # available as dependencies
+        other_files = {}
         for fdesc in request.proto_file:
-            if fdesc.name == filename:
-                results = process_file(filename, fdesc, options, other_files)
+            other_files[fdesc.name] = parse_file(fdesc.name, fdesc, options)
 
-                f = response.file.add()
-                f.name = results['headername']
-                f.content = results['headerdata']
+        for filename in request.file_to_generate:
+            for fdesc in request.proto_file:
+                if fdesc.name == filename:
+                    results = process_file(filename, fdesc, options, other_files)
 
-                f = response.file.add()
-                f.name = results['sourcename']
-                f.content = results['sourcedata']
+                    f = response.file.add()
+                    f.name = results['headername']
+                    f.content = results['headerdata']
+
+                    f = response.file.add()
+                    f.name = results['sourcename']
+                    f.content = results['sourcedata']
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        response.error = str(e) + "\n" + err
+        sys.stderr.write(err)
 
     if hasattr(plugin_pb2.CodeGeneratorResponse, "FEATURE_PROTO3_OPTIONAL"):
         response.supported_features = plugin_pb2.CodeGeneratorResponse.FEATURE_PROTO3_OPTIONAL

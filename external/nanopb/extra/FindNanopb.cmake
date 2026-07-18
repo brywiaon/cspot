@@ -153,6 +153,23 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
   list(REMOVE_DUPLICATES _nanopb_include_path)
 
   set(GENERATOR_PATH ${CMAKE_CURRENT_BINARY_DIR}/nanopb/generator)
+  set(_NANOPB_PROTOC_COMMAND)
+  if(NANOPB_USE_GRPC_TOOLS_WRAPPER AND PROTOBUF_PROTOC_EXECUTABLE AND NOT "${PROTOBUF_PROTOC_EXECUTABLE}" MATCHES "-NOTFOUND$")
+    set(_NANOPB_PROTOC_COMMAND ${PROTOBUF_PROTOC_EXECUTABLE} -m grpc_tools.protoc)
+  elseif(PROTOBUF_PROTOC_COMMAND AND NOT "${PROTOBUF_PROTOC_COMMAND}" MATCHES "-NOTFOUND$")
+    set(_NANOPB_PROTOC_COMMAND ${PROTOBUF_PROTOC_COMMAND})
+  elseif(PROTOBUF_PROTOC_EXECUTABLE AND NOT "${PROTOBUF_PROTOC_EXECUTABLE}" MATCHES "-NOTFOUND$")
+    set(_NANOPB_PROTOC_COMMAND ${PROTOBUF_PROTOC_EXECUTABLE})
+  else()
+    message(FATAL_ERROR
+      "Nanopb: no valid protoc command resolved for generator step\n"
+      "  PROTOBUF_PROTOC_EXECUTABLE='${PROTOBUF_PROTOC_EXECUTABLE}'\n"
+      "  PROTOBUF_PROTOC_COMMAND='${PROTOBUF_PROTOC_COMMAND}'\n"
+      "  NANOPB_USE_GRPC_TOOLS_WRAPPER='${NANOPB_USE_GRPC_TOOLS_WRAPPER}'\n"
+      "  Python3_EXECUTABLE='${Python3_EXECUTABLE}'")
+  endif()
+
+  list(GET _NANOPB_PROTOC_COMMAND 0 NANOPB_PROTOC_ENV_EXECUTABLE)
 
   set(NANOPB_GENERATOR_EXECUTABLE ${GENERATOR_PATH}/nanopb_generator.py)
   if (CMAKE_HOST_WIN32)
@@ -164,6 +181,7 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
   set(GENERATOR_CORE_DIR ${GENERATOR_PATH}/proto)
   set(GENERATOR_CORE_SRC
       ${GENERATOR_CORE_DIR}/nanopb.proto)
+  file(GLOB_RECURSE NANOPB_GENERATOR_SOURCE_FILES "${NANOPB_GENERATOR_SOURCE_DIR}/*")
 
   # Treat the source directory as immutable.
   #
@@ -176,6 +194,7 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
       OUTPUT ${NANOPB_GENERATOR_EXECUTABLE} ${GENERATOR_CORE_SRC}
       COMMAND ${CMAKE_COMMAND} -E copy_directory
       ARGS ${NANOPB_GENERATOR_SOURCE_DIR} ${GENERATOR_PATH}
+      DEPENDS ${NANOPB_GENERATOR_SOURCE_FILES}
       VERBATIM)
 
   set(GENERATOR_CORE_PYTHON_SRC)
@@ -187,10 +206,11 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
       set(GENERATOR_CORE_PYTHON_SRC ${GENERATOR_CORE_PYTHON_SRC} ${output})
       add_custom_command(
         OUTPUT ${output}
-        COMMAND ${CUSTOM_COMMAND_PREFIX} ${PROTOBUF_PROTOC_EXECUTABLE}
+        COMMAND ${CMAKE_COMMAND} -E env "NANOPB_PROTOC_EXECUTABLE=${NANOPB_PROTOC_ENV_EXECUTABLE}" ${_NANOPB_PROTOC_COMMAND}
         ARGS -I${GENERATOR_PATH}/proto
           --python_out=${GENERATOR_CORE_DIR} ${ABS_FIL}
-        DEPENDS ${ABS_FIL}
+        COMMAND ${Python3_EXECUTABLE} ${NANOPB_GENERATOR_SOURCE_DIR}/fix_nanopb_pb2.py ${output}
+        DEPENDS ${ABS_FIL} ${NANOPB_GENERATOR_SOURCE_DIR}/fix_nanopb_pb2.py
         VERBATIM)
   endforeach()
 
@@ -262,7 +282,7 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
     # - An older hacky one using ':' as option separator in protoc args preventing the ':' to be used in path.
     # - Or a newer one, using --nanopb_opt which requires a version of protoc >= 3.6
     # So we will determine which version of protoc we have available and choose accordingly.
-    execute_process(COMMAND ${PROTOBUF_PROTOC_EXECUTABLE} --version OUTPUT_VARIABLE PROTOC_VERSION_STRING OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND ${_NANOPB_PROTOC_COMMAND} --version OUTPUT_VARIABLE PROTOC_VERSION_STRING OUTPUT_STRIP_TRAILING_WHITESPACE)
     string(REGEX MATCH "[(0-9)].*.[(0-9)].*.[(0-9)].*$" PROTOC_VERSION "${PROTOC_VERSION_STRING}")
 
     if(PROTOC_VERSION AND PROTOC_VERSION VERSION_LESS "3.6.0")
@@ -279,7 +299,7 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
     add_custom_command(
       OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${FIL_PATH_REL}/${FIL_WE}.pb.c"
              "${CMAKE_CURRENT_BINARY_DIR}/${FIL_PATH_REL}/${FIL_WE}.pb.h"
-      COMMAND ${CUSTOM_COMMAND_PREFIX} ${PROTOBUF_PROTOC_EXECUTABLE}
+      COMMAND ${CMAKE_COMMAND} -E env "NANOPB_PROTOC_EXECUTABLE=${NANOPB_PROTOC_ENV_EXECUTABLE}" ${_NANOPB_PROTOC_COMMAND}
       ARGS -I${GENERATOR_PATH} -I${GENERATOR_CORE_DIR}
            -I${CMAKE_CURRENT_BINARY_DIR} ${_nanopb_include_path}
            --plugin=protoc-gen-nanopb=${NANOPB_GENERATOR_PLUGIN}
@@ -347,16 +367,111 @@ foreach(FIL ${_nanopb_hdrs})
 endforeach()
 
 # Find the protoc Executable
-find_program(PROTOBUF_PROTOC_EXECUTABLE
-    NAMES protoc
-    DOC "The Google Protocol Buffers Compiler"
-    PATHS
-    ${PROTOBUF_SRC_ROOT_FOLDER}/vsprojects/Release
-    ${PROTOBUF_SRC_ROOT_FOLDER}/vsprojects/Debug
-    ${NANOPB_SRC_ROOT_FOLDER}/generator-bin
-    ${NANOPB_SRC_ROOT_FOLDER}/generator
-)
+set(_nanopb_workspace_protoc)
+if(CMAKE_HOST_WIN32)
+  set(_nanopb_workspace_protoc "${CMAKE_SOURCE_DIR}/tools/protoc/bin/protoc.exe")
+else()
+  set(_nanopb_workspace_protoc "${CMAKE_SOURCE_DIR}/tools/protoc/bin/protoc")
+endif()
+
+if(EXISTS "${_nanopb_workspace_protoc}")
+  set(PROTOBUF_PROTOC_EXECUTABLE "${_nanopb_workspace_protoc}")
+else()
+  unset(PROTOBUF_PROTOC_EXECUTABLE CACHE)
+  find_program(PROTOBUF_PROTOC_EXECUTABLE
+      NAMES protoc
+      DOC "The Google Protocol Buffers Compiler"
+      PATHS
+      ${CMAKE_SOURCE_DIR}/tools/protoc/bin
+      ${PROTOBUF_SRC_ROOT_FOLDER}/vsprojects/Release
+      ${PROTOBUF_SRC_ROOT_FOLDER}/vsprojects/Debug
+      ${NANOPB_SRC_ROOT_FOLDER}/generator-bin
+  )
+endif()
 mark_as_advanced(PROTOBUF_PROTOC_EXECUTABLE)
+set(PROTOBUF_PROTOC_COMMAND ${PROTOBUF_PROTOC_EXECUTABLE})
+
+# Reject nanopb wrapper script as "real protoc" to avoid self-invocation loops.
+set(NANOPB_USE_GRPC_TOOLS_WRAPPER OFF)
+if(PROTOBUF_PROTOC_EXECUTABLE)
+  get_filename_component(_nanopb_protoc_dir "${PROTOBUF_PROTOC_EXECUTABLE}" DIRECTORY)
+  get_filename_component(_nanopb_protoc_name "${PROTOBUF_PROTOC_EXECUTABLE}" NAME)
+  if(EXISTS "${_nanopb_protoc_dir}/nanopb_generator.py")
+    set(PROTOBUF_PROTOC_EXECUTABLE "PROTOBUF_PROTOC_EXECUTABLE-NOTFOUND")
+    unset(PROTOBUF_PROTOC_COMMAND)
+  elseif(_nanopb_protoc_name MATCHES "^[Pp]ython(\\.exe)?$" AND (NOT DEFINED PROTOBUF_PROTOC_COMMAND OR "${PROTOBUF_PROTOC_COMMAND}" STREQUAL "${PROTOBUF_PROTOC_EXECUTABLE}"))
+    message(STATUS "Nanopb: cached protoc executable is Python without grpc_tools arguments, re-evaluating fallback")
+    set(PROTOBUF_PROTOC_EXECUTABLE "PROTOBUF_PROTOC_EXECUTABLE-NOTFOUND")
+    unset(PROTOBUF_PROTOC_COMMAND)
+  endif()
+endif()
+
+if(NOT PROTOBUF_PROTOC_EXECUTABLE OR "${PROTOBUF_PROTOC_EXECUTABLE}" MATCHES "-NOTFOUND$")
+  unset(PROTOBUF_PROTOC_COMMAND)
+endif()
+
+# Source-checkout fallback: use nanopb Python wrapper if grpc_tools + protobuf are available.
+if(NOT PROTOBUF_PROTOC_EXECUTABLE)
+  unset(_nanopb_python_candidate)
+  message(STATUS "Nanopb: IDF_PYTHON_ENV_PATH='$ENV{IDF_PYTHON_ENV_PATH}'")
+  if(DEFINED ENV{IDF_PYTHON_ENV_PATH})
+    if(CMAKE_HOST_WIN32)
+      file(TO_CMAKE_PATH "$ENV{IDF_PYTHON_ENV_PATH}" _nanopb_idf_python_root)
+      set(_nanopb_idf_python "${_nanopb_idf_python_root}/Scripts/python.exe")
+    else()
+      file(TO_CMAKE_PATH "$ENV{IDF_PYTHON_ENV_PATH}" _nanopb_idf_python_root)
+      set(_nanopb_idf_python "${_nanopb_idf_python_root}/bin/python")
+    endif()
+    message(STATUS "Nanopb: IDF python candidate='${_nanopb_idf_python}'")
+    if(EXISTS "${_nanopb_idf_python}")
+      set(_nanopb_python_candidate "${_nanopb_idf_python}")
+      message(STATUS "Nanopb: using IDF_PYTHON_ENV_PATH interpreter")
+    else()
+      message(STATUS "Nanopb: IDF_PYTHON_ENV_PATH interpreter not found on disk")
+    endif()
+  endif()
+
+  if(_nanopb_python_candidate)
+    set(Python3_Interpreter_FOUND TRUE)
+    set(Python3_EXECUTABLE "${_nanopb_python_candidate}")
+    message(STATUS "Nanopb: interpreter path taken=IDF_PYTHON_ENV_PATH")
+  else()
+    message(STATUS "Nanopb: interpreter path taken=find_package(Python3)")
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+  endif()
+
+  message(STATUS "Nanopb: Python3 interpreter found=${Python3_Interpreter_FOUND} executable='${Python3_EXECUTABLE}'")
+  if(Python3_Interpreter_FOUND)
+    execute_process(
+      COMMAND ${Python3_EXECUTABLE} -c "import grpc_tools.protoc"
+      RESULT_VARIABLE _nanopb_python_grpc_ok
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    execute_process(
+      COMMAND ${Python3_EXECUTABLE} -c "import google.protobuf"
+      RESULT_VARIABLE _nanopb_python_protobuf_ok
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    message(STATUS "Nanopb: grpc_tools detection result=${_nanopb_python_grpc_ok}")
+    message(STATUS "Nanopb: google.protobuf detection result=${_nanopb_python_protobuf_ok}")
+    if(_nanopb_python_grpc_ok EQUAL 0 AND _nanopb_python_protobuf_ok EQUAL 0)
+      set(PROTOBUF_PROTOC_EXECUTABLE "${Python3_EXECUTABLE}")
+      set(PROTOBUF_PROTOC_COMMAND ${Python3_EXECUTABLE} -m grpc_tools.protoc)
+      set(NANOPB_USE_GRPC_TOOLS_WRAPPER ON)
+    endif()
+  endif()
+endif()
+
+# Export resolved protoc settings across directory scopes for NANOPB_GENERATE_CPP callers.
+set(PROTOBUF_PROTOC_EXECUTABLE "${PROTOBUF_PROTOC_EXECUTABLE}" CACHE INTERNAL "Resolved protoc executable for Nanopb" FORCE)
+if(DEFINED PROTOBUF_PROTOC_COMMAND)
+  set(PROTOBUF_PROTOC_COMMAND ${PROTOBUF_PROTOC_COMMAND} CACHE INTERNAL "Resolved protoc command for Nanopb" FORCE)
+else()
+  unset(PROTOBUF_PROTOC_COMMAND CACHE)
+endif()
+set(NANOPB_USE_GRPC_TOOLS_WRAPPER ${NANOPB_USE_GRPC_TOOLS_WRAPPER} CACHE INTERNAL "Use grpc_tools protoc wrapper for Nanopb" FORCE)
 
 # Find nanopb generator source dir
 find_path(NANOPB_GENERATOR_SOURCE_DIR
@@ -369,9 +484,23 @@ find_path(NANOPB_GENERATOR_SOURCE_DIR
 mark_as_advanced(NANOPB_GENERATOR_SOURCE_DIR)
 
 include(FindPackageHandleStandardArgs)
+set(NANOPB_PROTOC_AVAILABLE FALSE)
+if(PROTOBUF_PROTOC_EXECUTABLE OR PROTOBUF_PROTOC_COMMAND)
+  set(NANOPB_PROTOC_AVAILABLE TRUE)
+endif()
+message(STATUS "Nanopb: PROTOBUF_PROTOC_EXECUTABLE='${PROTOBUF_PROTOC_EXECUTABLE}'")
+message(STATUS "Nanopb: PROTOBUF_PROTOC_COMMAND='${PROTOBUF_PROTOC_COMMAND}'")
+message(STATUS "Nanopb: NANOPB_PROTOC_AVAILABLE='${NANOPB_PROTOC_AVAILABLE}'")
 find_package_handle_standard_args(Nanopb DEFAULT_MSG
   NANOPB_INCLUDE_DIRS
   NANOPB_SRCS NANOPB_HDRS
   NANOPB_GENERATOR_SOURCE_DIR
-  PROTOBUF_PROTOC_EXECUTABLE
+  NANOPB_PROTOC_AVAILABLE
   )
+
+if(NANOPB_FOUND AND NOT NANOPB_PROTOC_AVAILABLE)
+  message(FATAL_ERROR
+    "Nanopb source-checkout build requires protoc support. ESP-IDF does not bundle protoc. "
+    "Install a real protoc compiler in PATH (e.g. protobuf release/choco), "
+    "or install Python packages in the active build interpreter: protobuf + grpcio-tools.")
+endif()

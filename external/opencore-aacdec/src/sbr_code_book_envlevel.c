@@ -127,7 +127,7 @@ extern "C"
        raw table: HuffCode3C2FIX.m/envelopeLevel_00T_cF.mat/m_hALC_cF
        built by : FH 01-07-05 */
 
-    extern const Char bookSbrEnvLevel10T[120][2] =
+    const Char bookSbrEnvLevel10T[120][2] =
     {
         {   1,   2 },    { -64, -65 },    {   3,   4 },    { -63, -66 },
         {   5,   6 },    { -62, -67 },    {   7,   8 },    { -61, -68 },
@@ -165,7 +165,7 @@ extern "C"
        raw table: HuffCode3C2FIX.m/envelopeLevel_00F_cF.mat/m_hALC_cF
        built by : FH 01-07-05 */
 
-    extern const Char bookSbrEnvLevel10F[120][2] =
+    const Char bookSbrEnvLevel10F[120][2] =
     {
         {   1,   2 },    { -64, -65 },    {   3,   4 },    { -63, -66 },
         {   5,   6 },    { -67, -62 },    {   7,   8 },    { -68, -61 },
@@ -210,7 +210,7 @@ extern "C"
        raw table: HuffCode3C.m/envelopePan_00T.mat/v_hALB
        built by : FH 01-05-15 */
 
-    extern const Char bookSbrEnvBalance10T[48][2] =
+    const Char bookSbrEnvBalance10T[48][2] =
     {
         { -64,   1 },    { -63,   2 },    { -65,   3 },    { -62,   4 },
         { -66,   5 },    { -61,   6 },    { -67,   7 },    { -60,   8 },
@@ -230,7 +230,7 @@ extern "C"
        raw table: HuffCode3C.m/envelopePan_00T.mat/v_hALB
        built by : FH 01-05-15 */
 
-    extern const Char bookSbrEnvBalance10F[48][2] =
+    const Char bookSbrEnvBalance10F[48][2] =
     {
         { -64,   1 },    { -65,   2 },    { -63,   3 },    { -66,   4 },
         { -62,   5 },    { -61,   6 },    { -67,   7 },    { -68,   8 },
@@ -257,7 +257,7 @@ extern "C"
        raw table: HuffCode2.m
        built by : FH 00-02-04 */
 
-    extern const Char bookSbrEnvLevel11T[62][2] =
+    const Char bookSbrEnvLevel11T[62][2] =
     {
         { -64,   1 },    { -65,   2 },    { -63,   3 },    { -66,   4 },
         { -62,   5 },    { -67,   6 },    { -61,   7 },    { -68,   8 },
@@ -281,7 +281,7 @@ extern "C"
        raw table: HuffCode2.m
        built by : FH 00-02-04 */
 
-    extern const Char bookSbrEnvLevel11F[62][2] =
+    const Char bookSbrEnvLevel11F[62][2] =
     {
         { -64,   1 },    { -65,   2 },    { -63,   3 },    { -66,   4 },
         { -62,   5 },    { -67,   6 },    {   7,   8 },    { -61, -68 },
@@ -312,7 +312,7 @@ extern "C"
        raw table: HuffCode3C.m/envelopeBalance_11T.mat/v_hALB
        built by : FH 01-05-15 */
 
-    extern const Char bookSbrEnvBalance11T[24][2] =
+    const Char bookSbrEnvBalance11T[24][2] =
     {
         { -64,   1 },    { -63,   2 },    { -65,   3 },    { -66,   4 },
         { -62,   5 },    { -61,   6 },    { -67,   7 },    { -68,   8 },
@@ -326,7 +326,7 @@ extern "C"
        raw table: HuffCode3C.m/envelopeBalance_11T.mat/v_hALB
        built by : FH 01-05-15 */
 
-    extern const Char bookSbrEnvBalance11F[24][2] =
+    const Char bookSbrEnvBalance11F[24][2] =
     {
         { -64,   1 },    { -65,   2 },    { -63,   3 },    { -66,   4 },
         { -62,   5 },    { -61,   6 },    { -67,   7 },    { -68,   8 },
@@ -347,7 +347,7 @@ extern "C"
        raw table: HuffCode2.m
        built by : FH 00-02-04 */
 
-    extern const Char bookSbrNoiseLevel11T[62][2] =
+    const Char bookSbrNoiseLevel11T[62][2] =
     {
         { -64,   1 },    { -63,   2 },    { -65,   3 },    { -66,   4 },
         { -62,   5 },    { -67,   6 },    {   7,   8 },    { -61, -68 },
@@ -378,7 +378,7 @@ extern "C"
        raw table: HuffCode3C.m/noiseBalance_11.mat/v_hALB
        built by : FH 01-05-15 */
 
-    extern const Char bookSbrNoiseBalance11T[24][2] =
+    const Char bookSbrNoiseBalance11T[24][2] =
     {
         { -64,   1 },    { -65,   2 },    { -63,   3 },    {   4,   9 },
         { -66,   5 },    { -62,   6 },    {   7,   8 },    { -76, -75 },

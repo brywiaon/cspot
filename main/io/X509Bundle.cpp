@@ -3,6 +3,7 @@
 #include <mbedtls/md.h>    // for mbedtls_md, mbedtls_md_get_size
 #include <mbedtls/pk.h>    // for mbedtls_pk_can_do, mbedtls_pk_pa...
 #include <mbedtls/ssl.h>   // for mbedtls_ssl_conf_ca_chain, mbedt...
+#include <mbedtls/build_info.h>
 #include <mbedtls/x509.h>  // for mbedtls_x509_buf, MBEDTLS_ERR_X5...
 #include <stdlib.h>        // for free, calloc
 #include <string.h>        // for memcmp, memcpy
@@ -35,6 +36,12 @@ static crt_bundle_t s_crt_bundle;
 int bell::X509Bundle::crtCheckCertificate(mbedtls_x509_crt* child,
                                           const uint8_t* pub_key_buf,
                                           size_t pub_key_len) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+  (void)child;
+  (void)pub_key_buf;
+  (void)pub_key_len;
+  return MBEDTLS_ERR_X509_FATAL_ERROR;
+#else
   int ret = 0;
   mbedtls_x509_crt parent;
   const mbedtls_md_info_t* md_info;
@@ -75,6 +82,7 @@ cleanup:
   mbedtls_x509_crt_free(&parent);
 
   return ret;
+#endif
 }
 
 /* This callback is called for every certificate in the chain. If the chain
