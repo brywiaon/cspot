@@ -469,6 +469,7 @@ size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
 
   size_t requestedBytes = nmemb * size;
   uint32_t waitStartMs = trackPlayerNowMs();
+  static unsigned long lastNoDataRetryLogMs = 0;
   for (int attempt = 0; attempt < 4; attempt++) {
     size_t bytesRead =
         this->currentTrackStream->readBytes((uint8_t*)ptr, requestedBytes);
@@ -487,9 +488,14 @@ size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
       return 0;
     }
 
-    CSPOT_LOG(error,
-              "CDN read returned no data before EOF, retrying pos=%u size=%u attempt=%d",
-              (unsigned)streamPosition, (unsigned)streamSize, attempt + 1);
+    unsigned long nowMs = trackPlayerNowMs();
+    if (lastNoDataRetryLogMs == 0 || nowMs < lastNoDataRetryLogMs ||
+        nowMs - lastNoDataRetryLogMs >= 3000UL) {
+      CSPOT_LOG(warning,
+                "CDN read returned no data before EOF, retrying pos=%u size=%u attempt=%d",
+                (unsigned)streamPosition, (unsigned)streamSize, attempt + 1);
+      lastNoDataRetryLogMs = nowMs;
+    }
     BELL_SLEEP_MS(40);
   }
 
