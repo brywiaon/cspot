@@ -148,6 +148,7 @@ void TrackPlayer::resetState(bool paused) {
 void TrackPlayer::seekMs(size_t ms) {
   CSPOT_LOG(info, "Seeking...");
   this->pendingSeekPositionMs = ms;
+  CDNAudioFile::abortActiveStream();
 }
 
 void TrackPlayer::runTask() {
@@ -322,6 +323,8 @@ void TrackPlayer::runTask() {
             eof = false;
             break;
           }
+
+          track->requestedPosition = seekPosition;
 
           // Seek to the new position
           VORBIS_SEEK(&vorbisFile, seekPosition);

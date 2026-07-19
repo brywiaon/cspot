@@ -122,7 +122,7 @@ size_t CDNAudioFile::getPosition() {
 }
 
 void CDNAudioFile::seek(size_t newPos) {
-  cancelPrefetch(true);
+  cancelPrefetch(false);
   this->enableRequestMargin = true;
   this->startupRangeComplete = false;
   this->position = newPos;
