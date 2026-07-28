@@ -19,6 +19,9 @@ CircularBuffer::CircularBuffer(size_t dataCapacity) {
   if (!rawBuffer) {
     rawBuffer = static_cast<uint8_t*>(std::malloc(dataCapacity));
   }
+  if (!rawBuffer) {
+    this->dataCapacity = 0;
+  }
   buffer = std::unique_ptr<uint8_t, void (*)(void*)>(rawBuffer, std::free);
   this->dataSemaphore = std::make_unique<bell::WrappedSemaphore>(5);
 };
@@ -29,7 +32,7 @@ size_t CircularBuffer::size() const {
 }
 
 size_t CircularBuffer::write(const uint8_t* data, size_t bytes) {
-  if (bytes == 0)
+  if (bytes == 0 || !buffer || dataCapacity == 0)
     return 0;
 
   std::lock_guard<std::mutex> guard(bufferMutex);
@@ -76,7 +79,7 @@ void CircularBuffer::emptyExcept(size_t sizeToSet) {
 }
 
 size_t CircularBuffer::read(uint8_t* data, size_t bytes) {
-  if (bytes == 0)
+  if (bytes == 0 || !buffer || dataCapacity == 0)
     return 0;
 
   std::lock_guard<std::mutex> guard(bufferMutex);

@@ -299,7 +299,10 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
     add_custom_command(
       OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${FIL_PATH_REL}/${FIL_WE}.pb.c"
              "${CMAKE_CURRENT_BINARY_DIR}/${FIL_PATH_REL}/${FIL_WE}.pb.h"
-      COMMAND ${CMAKE_COMMAND} -E env "NANOPB_PROTOC_EXECUTABLE=${NANOPB_PROTOC_ENV_EXECUTABLE}" ${_NANOPB_PROTOC_COMMAND}
+      COMMAND ${CMAKE_COMMAND} -E env
+              "NANOPB_PROTOC_EXECUTABLE=${NANOPB_PROTOC_ENV_EXECUTABLE}"
+              "NANOPB_PYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+              ${_NANOPB_PROTOC_COMMAND}
       ARGS -I${GENERATOR_PATH} -I${GENERATOR_CORE_DIR}
            -I${CMAKE_CURRENT_BINARY_DIR} ${_nanopb_include_path}
            --plugin=protoc-gen-nanopb=${NANOPB_GENERATOR_PLUGIN}
@@ -307,6 +310,7 @@ function(NANOPB_GENERATE_CPP SRCS HDRS)
            ${ABS_FIL}
       DEPENDS ${ABS_FIL} ${GENERATOR_CORE_PYTHON_SRC}
            ${ABS_OPT_FIL} ${NANOPB_DEPENDS}
+      JOB_POOL nanopb_generator_pool
       COMMENT "Running C++ protocol buffer compiler using nanopb plugin on ${FIL}"
       VERBATIM )
 

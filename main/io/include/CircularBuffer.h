@@ -17,6 +17,7 @@ class CircularBuffer {
   size_t size() const;
 
   size_t capacity() const { return dataCapacity; }
+  bool valid() const { return buffer != nullptr && dataCapacity > 0; }
 
   size_t write(const uint8_t* data, size_t bytes);
   size_t read(uint8_t* data, size_t bytes);

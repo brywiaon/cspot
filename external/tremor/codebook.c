@@ -24,10 +24,13 @@
 
 static void tremor_coop_yield(int force_delay){
   static unsigned int yield_counter=0;
+  (void)force_delay;
   yield_counter++;
-  if(force_delay || (yield_counter&0xff)==0){
+  /* Never sleep in the entropy decoder's inner loops. A one-tick delay at
+     every forced call made decoding slower than real time on ESP32-P4. */
+  if((yield_counter&0xfff)==0){
     vTaskDelay(1);
-  }else if((yield_counter&0x1f)==0){
+  }else if((yield_counter&0xff)==0){
     taskYIELD();
   }
 }

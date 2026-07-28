@@ -9,7 +9,8 @@
 :: --plugin= on the command line.
 
 set mydir=%~dp0
-set "nanopb_python=%IDF_PYTHON_ENV_PATH%\Scripts\python.exe"
+set "nanopb_python=%NANOPB_PYTHON_EXECUTABLE%"
+if not defined nanopb_python set "nanopb_python=%IDF_PYTHON_ENV_PATH%\Scripts\python.exe"
 if not exist "%nanopb_python%" (
   where python >NUL 2>&1
   if errorlevel 1 (

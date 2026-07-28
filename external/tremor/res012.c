@@ -30,10 +30,11 @@
 
 static void res_coop_yield(int force_delay){
   static unsigned int yield_counter=0;
+  (void)force_delay;
   yield_counter++;
-  if(force_delay || (yield_counter&0xff)==0){
+  if((yield_counter&0xfff)==0){
     vTaskDelay(1);
-  }else if((yield_counter&0x1f)==0){
+  }else if((yield_counter&0xff)==0){
     taskYIELD();
   }
 }
