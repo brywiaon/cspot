@@ -70,12 +70,12 @@ class CDNAudioFile {
   const int OPUS_FOOTER_PREFFERED = 1024 * 12;  // 12K should be safe
   const int SEEK_MARGIN_SIZE = 1024 * 4;
 
-  // Keep startup/seek reads short, then use moderate steady reads so hosted
-  // Wi-Fi is not hammered by excessive range reconnects.
-  const int HTTP_START_BUFFER_SIZE = 256 * 1024;
+  // Half-megabyte ranges keep each TLS read bounded while still amortizing
+  // request setup. Two buffers maintain a continuous download/decode pipeline.
+  const int HTTP_START_BUFFER_SIZE = 512 * 1024;
   const int HTTP_BUFFER_SIZE = 512 * 1024;
   const int HTTP_PREFETCH_BUFFER_SIZE = HTTP_BUFFER_SIZE;
-  const int HTTP_PREFETCH_WAIT_MS = 12000;
+  const int HTTP_PREFETCH_WAIT_MS = 8000;
   const int SPOTIFY_OPUS_HEADER = 167;
 
   // Used to store opus metadata, speeds up read

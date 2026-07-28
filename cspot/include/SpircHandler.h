@@ -40,11 +40,13 @@ class SpircHandler {
   };
 
   typedef std::function<void(std::unique_ptr<Event>)> EventHandler;
+  typedef std::function<uint32_t()> PositionProvider;
 
   void subscribeToMercury();
   std::shared_ptr<TrackPlayer> getTrackPlayer();
 
   void setEventHandler(EventHandler handler);
+  void setPositionProvider(PositionProvider provider);
 
   void setPause(bool pause);
 
@@ -67,6 +69,7 @@ class SpircHandler {
   std::shared_ptr<cspot::TrackQueue> trackQueue;
 
   EventHandler eventHandler = nullptr;
+  PositionProvider positionProvider = nullptr;
 
   std::shared_ptr<cspot::PlaybackState> playbackState;
   unsigned long long lastSkipCommandMs = 0;

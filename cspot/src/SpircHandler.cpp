@@ -27,7 +27,7 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
 
   auto EOFCallback = [this](uint32_t decodedMs, uint32_t durationMs,
                             size_t streamPosition, size_t streamSize) {
-    constexpr uint32_t eofSlackMs = 1000;
+    constexpr uint32_t eofSlackMs = 250;
     std::string currentTrackUri;
     int currentTrackIndex = playbackState->innerFrame.state.has_playing_track_index
                                 ? playbackState->innerFrame.state.playing_track_index
@@ -38,9 +38,8 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
     }
     const bool streamAtEnd =
         streamSize > 0 && streamPosition + (4 * 1024) >= streamSize;
-    const bool durationReached = durationMs > 0 && decodedMs >= durationMs;
-    const bool nearEnd = durationMs > 0 && (durationMs - decodedMs) <= eofSlackMs;
-    if (!streamAtEnd && !durationReached && !nearEnd) {
+    const bool durationReached = durationMs > 0 && decodedMs + eofSlackMs >= durationMs;
+    if (!streamAtEnd && !durationReached) {
       CSPOT_LOG(error,
                 "Rejected non-terminal EOF-driven NEXT decoded=%u duration=%u remaining=%u streamAtEnd=%d streamPos=%u size=%u trackUri=%s",
                 (unsigned)decodedMs, (unsigned)durationMs,
@@ -498,12 +497,26 @@ void SpircHandler::setEventHandler(EventHandler handler) {
   this->eventHandler = handler;
 }
 
+void SpircHandler::setPositionProvider(PositionProvider provider) {
+  this->positionProvider = std::move(provider);
+}
+
 void SpircHandler::setPause(bool isPaused) {
+  // The bridge tracks PCM that has actually reached the speaker. Anchor SPIRC
+  // to that audible position before publishing a pause/resume transition.
+  if (positionProvider && playbackState->isActive()) {
+    playbackState->updatePositionMs(positionProvider());
+  }
   if (isPaused) {
     CSPOT_LOG(debug, "External pause command");
     playbackState->setPlaybackState(PlaybackState::State::Paused);
   } else {
     CSPOT_LOG(debug, "External play command");
+
+    // A source handoff fully stops the decoder so it cannot contend with
+    // AirPlay/API after cspot releases ownership. Resume the existing queue
+    // before publishing the playing state.
+    this->trackPlayer->start();
 
     playbackState->setPlaybackState(PlaybackState::State::Playing);
   }

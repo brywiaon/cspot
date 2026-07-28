@@ -30,7 +30,8 @@
 #endif
 
 static constexpr uint32_t INITIAL_HANDOFF_SEEK_BYPASS_MS = 0;
-static constexpr uint32_t PCM_RATE_LOG_INTERVAL_MS = 1000;
+static constexpr uint32_t PCM_RATE_LOG_INTERVAL_MS = 3000;
+static constexpr size_t PCM_PRODUCER_YIELD_BYTES = 8 * 1024 * 1024;
 
 namespace cspot {
 struct Context;
@@ -88,7 +89,10 @@ uint32_t trackPlayerNowMs() {
 TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          std::shared_ptr<cspot::TrackQueue> trackQueue,
                          EOFCallback eof, TrackLoadedCallback trackLoaded)
-    : bell::Task("cspot_player", 64 * 1024, 15, 1) {
+    // Decode/network production belongs on Core 0. Core 1 is reserved for the
+    // bridge's high-priority PCM/I2S consumer so Vorbis and PSRAM bursts can
+    // never delay the speaker clock.
+    : bell::Task("cspot_player", 64 * 1024, 5, 0) {
   this->ctx = ctx;
   this->eofCallback = eof;
   this->trackLoaded = trackLoaded;
@@ -148,7 +152,6 @@ void TrackPlayer::resetState(bool paused) {
 void TrackPlayer::seekMs(size_t ms) {
   CSPOT_LOG(info, "Seeking...");
   this->pendingSeekPositionMs = ms;
-  CDNAudioFile::abortActiveStream();
 }
 
 void TrackPlayer::runTask() {
@@ -183,10 +186,6 @@ void TrackPlayer::runTask() {
 
     endOfQueueReached = false;
 
-    // Wait 800ms. If next reset is requested in meantime, restart the queue.
-    // Gets rid of excess actions during rapid queueing
-      BELL_SLEEP_MS(5);
-
     if (pendingReset) {
       continue;
     }
@@ -199,7 +198,7 @@ void TrackPlayer::runTask() {
         track = nullptr;
       }
 
-      BELL_SLEEP_MS(10);
+      BELL_SLEEP_MS(2);
       continue;
     }
 
@@ -217,7 +216,7 @@ void TrackPlayer::runTask() {
                   (int)track->state, (unsigned)(cspotPlayerNowMs() - waitStartMs),
                   (unsigned)(track->loadStartMs ? cspotPlayerNowMs() - track->loadStartMs : 0));
         track = nullptr;
-        BELL_SLEEP_MS(500);
+        BELL_SLEEP_MS(100);
         continue;
       }
     }
@@ -250,7 +249,7 @@ void TrackPlayer::runTask() {
         currentSongPlaying = false;
         track->loading = false;
         track = nullptr;
-        BELL_SLEEP_MS(500);
+        BELL_SLEEP_MS(100);
         continue;
       }
 
@@ -401,8 +400,9 @@ void TrackPlayer::runTask() {
                 if (!currentSongPlaying || pendingReset)
                   break;
 
-                written = dataCallback(pcmBuffer.data() + (ret - toWrite),
-                                       toWrite, track->identifier);
+                size_t offset = (size_t)ret - (size_t)toWrite;
+                written = dataCallback(pcmBuffer.data() + offset, toWrite,
+                                       track->identifier);
               }
               if (written == 0) {
                 taskYIELD();
@@ -410,10 +410,8 @@ void TrackPlayer::runTask() {
               toWrite -= written;
             }
           }
-          if (decodedBytesSinceYield >= (512 * 1024)) {
+          if (decodedBytesSinceYield >= PCM_PRODUCER_YIELD_BYTES) {
             decodedBytesSinceYield = 0;
-          }
-          if ((producedBytesSinceLog & ((512 * 1024) - 1)) == 0) {
             taskYIELD();
           }
         }
@@ -428,6 +426,7 @@ void TrackPlayer::runTask() {
           uint32_t producedPerSec = elapsedMs > 0
                                         ? (uint32_t)((producedBytesSinceLog * 1000ULL) / elapsedMs)
                                         : 0;
+          (void)producedPerSec;
           CSPOT_LOG(info,
                     "PCM decode rate produced=%uB/s idle=%ums last_read_dt=%ums",
                     (unsigned)producedPerSec, (unsigned)decoderIdleMs,
@@ -455,6 +454,11 @@ void TrackPlayer::runTask() {
     }
 
     if (eof) {
+      // Decoding runs ahead of the physical output. Do not advance Spotify's
+      // queue until the speaker has rendered the PCM already handed off.
+      if (playbackDrainCallback != nullptr) {
+        playbackDrainCallback();
+      }
       if (trackQueue->isFinished()) {
         endOfQueueReached = true;
       }
@@ -499,7 +503,7 @@ size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
                 (unsigned)streamPosition, (unsigned)streamSize, attempt + 1);
       lastNoDataRetryLogMs = nowMs;
     }
-    BELL_SLEEP_MS(40);
+      BELL_SLEEP_MS(1);
   }
 
   uint32_t waitDtMs = trackPlayerNowMs() - waitStartMs;
@@ -544,4 +548,8 @@ long TrackPlayer::_vorbisTell() {
 
 void TrackPlayer::setDataCallback(DataCallback callback) {
   this->dataCallback = callback;
+}
+
+void TrackPlayer::setPlaybackDrainCallback(PlaybackDrainCallback callback) {
+  this->playbackDrainCallback = callback;
 }

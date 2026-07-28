@@ -26,12 +26,14 @@ endif()
 
 # Build protobuf code
 set(NANOPB_OPTIONS "-I${CMAKE_CURRENT_SOURCE_DIR}")
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS nanopb_generator_pool=1)
 file(GLOB PROTOS protobuf/*.proto)
 nanopb_generate_cpp(PROTO_SRCS PROTO_HDRS RELPATH ${CMAKE_CURRENT_SOURCE_DIR} ${PROTOS})
 add_custom_target(generate_proto_sources DEPENDS ${PROTO_SRCS} ${PROTO_HDRS})
 set_source_files_properties(${PROTO_SRCS} ${PROTO_HDRS} PROPERTIES GENERATED TRUE)
 
 add_library(cspot STATIC ${SOURCES} ${PROTO_SRCS})
+add_dependencies(cspot generate_proto_sources)
 target_compile_options(cspot PRIVATE "-fexceptions")
 # PUBLIC to propagate includes from bell to cspot dependents
 target_compile_definitions(bell PUBLIC PB_ENABLE_MALLOC)

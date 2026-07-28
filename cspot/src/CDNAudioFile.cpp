@@ -40,7 +40,7 @@ size_t readHttpStreamYielding(std::iostream& stream, uint8_t* dst,
     if (abortFlag && abortFlag->load()) {
       break;
     }
-    auto chunkSize = std::min<size_t>(4096, bytes - bytesReadTotal);
+    auto chunkSize = std::min<size_t>(16384, bytes - bytesReadTotal);
     stream.read((char*)dst + bytesReadTotal, chunkSize);
     if (abortFlag && abortFlag->load()) {
       break;
@@ -50,7 +50,7 @@ size_t readHttpStreamYielding(std::iostream& stream, uint8_t* dst,
       break;
     }
     bytesReadTotal += bytesRead;
-    if ((bytesReadTotal & 0x3FFF) == 0) {
+    if ((bytesReadTotal & 0x1FFFF) == 0) {
       BELL_SLEEP_MS(1);
     }
   }
@@ -261,7 +261,7 @@ void CDNAudioFile::startNextPrefetch() {
             (unsigned)nextPosition, (unsigned)HTTP_BUFFER_SIZE);
 
   BaseType_t ok = xTaskCreatePinnedToCore(
-      &CDNAudioFile::prefetchTaskEntry, "cdn_prefetch", 24 * 1024, this, 4,
+      &CDNAudioFile::prefetchTaskEntry, "cdn_prefetch", 24 * 1024, this, 9,
       &prefetchTask, 0);
   if (ok != pdPASS) {
     std::lock_guard<std::mutex> lock(prefetchMutex);
@@ -445,11 +445,20 @@ void CDNAudioFile::runPrefetchTask() {
     }
   }
 
+  bool adoptedWhileFinishing = false;
   {
     std::lock_guard<std::mutex> lock(prefetchMutex);
     prefetchConnection.reset();
     prefetchInFlight = false;
     prefetchTask = nullptr;
+    adoptedWhileFinishing = prefetchWasAdopted;
+  }
+
+  // The decoder may adopt a completed buffer before this task has cleared its
+  // in-flight flag. In that race, adoptPrefetch() cannot launch the following
+  // range, so continue the pipeline here once cleanup is complete.
+  if (adoptedWhileFinishing && !abortRequested) {
+    startNextPrefetch();
   }
 }
 #endif
@@ -513,6 +522,15 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     memcpy(dst, this->httpBuffer.data() + offsetPosition - lastRequestPosition,
            toRead);
     position += toRead;
+
+#if CSPOT_ENABLE_PREFETCH && defined(ESP_PLATFORM)
+    // Recover a missed launch race while there is still half a range available
+    // for decoding. startNextPrefetch() is idempotent while work is active.
+    if (offsetPosition + toRead >=
+        lastRequestPosition + (lastRequestCapacity / 2)) {
+      startNextPrefetch();
+    }
+#endif
 
 #if CSPOT_ENABLE_PREFETCH && defined(ESP_PLATFORM)
     if (prefetchWasAdopted) {

@@ -36,6 +36,7 @@ class TrackPlayer : bell::Task {
       TrackLoadedCallback;
   typedef std::function<size_t(uint8_t*, size_t, std::string_view)>
       DataCallback;
+  typedef std::function<void()> PlaybackDrainCallback;
   typedef std::function<void(uint32_t, uint32_t, size_t, size_t)> EOFCallback;
 
   TrackPlayer(std::shared_ptr<cspot::Context> ctx,
@@ -46,6 +47,7 @@ class TrackPlayer : bell::Task {
   void loadTrackFromRef(TrackReference& ref, size_t playbackMs,
                         bool startAutomatically);
   void setDataCallback(DataCallback callback);
+  void setPlaybackDrainCallback(PlaybackDrainCallback callback);
 
   // CDNTrackStream::TrackInfo getCurrentTrackInfo();
   void seekMs(size_t ms);
@@ -69,6 +71,7 @@ class TrackPlayer : bell::Task {
 
   TrackLoadedCallback trackLoaded;
   DataCallback dataCallback = nullptr;
+  PlaybackDrainCallback playbackDrainCallback = nullptr;
   EOFCallback eofCallback;
 
   // Playback control
@@ -83,7 +86,7 @@ class TrackPlayer : bell::Task {
   int currentSection;
 
   std::vector<uint8_t, bell::PsramAllocator<uint8_t>> pcmBuffer =
-      std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(128 * 1024);
+      std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(1024 * 1024);
 
   bool autoStart = false;
 
