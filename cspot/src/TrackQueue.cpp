@@ -63,13 +63,6 @@ void clearQueuedTracksCooperative(std::deque<std::shared_ptr<QueuedTrack>>& queu
   }
 }
 
-void keepOnlyFirstQueuedTrackCooperative(std::deque<std::shared_ptr<QueuedTrack>>& queue) {
-  while (queue.size() > 1) {
-    queue.pop_back();
-    cspotQueueYield(false);
-  }
-}
-
 std::string spotifyBodyPreview(std::string_view body) {
   auto previewSize = std::min<size_t>(body.size(), 160);
   std::string preview(body.substr(0, previewSize));
@@ -682,7 +675,8 @@ bool TrackQueue::queueNextTrack(int offset, uint32_t positionMs) {
 
 bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
   bool skipped = true;
-  std::scoped_lock lock(tracksMutex);
+  std::deque<std::shared_ptr<QueuedTrack>> retiredTracks;
+  std::unique_lock<std::mutex> lock(tracksMutex);
   int16_t oldIndex = currentTracksIndex;
 
   if (dir == SkipDirection::PREV) {
@@ -697,6 +691,7 @@ bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
       queueNextTrack(-1);
 
       if (preloadedTracks.size() > MAX_TRACKS_PRELOAD) {
+        retiredTracks.push_back(std::move(preloadedTracks.back()));
         preloadedTracks.pop_back();
       }
 
@@ -707,6 +702,7 @@ bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
   } else {
     if (currentTracks.size() > currentTracksIndex + 1) {
       if (!preloadedTracks.empty()) {
+        retiredTracks.push_back(std::move(preloadedTracks.front()));
         preloadedTracks.pop_front();
       }
 
@@ -738,6 +734,8 @@ bool TrackQueue::skipTrack(SkipDirection dir, bool expectNotify) {
               (int)currentTracksIndex, (unsigned)currentTracks.size());
   }
 
+  lock.unlock();
+  clearQueuedTracksCooperative(retiredTracks);
   return skipped;
 }
 
@@ -761,7 +759,8 @@ bool TrackQueue::isCurrentTrack(const TrackReference& ref) {
 }
 
 bool TrackQueue::updateTracks(uint32_t requestedPosition, bool initial) {
-  std::scoped_lock lock(tracksMutex);
+  std::deque<std::shared_ptr<QueuedTrack>> retiredTracks;
+  std::unique_lock<std::mutex> lock(tracksMutex);
   bool cleared = true;
   int16_t oldIndex = currentTracksIndex;
 
@@ -774,8 +773,9 @@ bool TrackQueue::updateTracks(uint32_t requestedPosition, bool initial) {
             (unsigned)currentTracks.size(), (unsigned)requestedPosition);
 
   if (initial) {
-    // Clear preloaded tracks
-    clearQueuedTracksCooperative(preloadedTracks);
+    // Detach stale work immediately; cancellation/destruction happens after
+    // releasing the control-path mutex.
+    retiredTracks.swap(preloadedTracks);
 
     if (currentTracksIndex < currentTracks.size()) {
       // Push a song on the preloaded queue
@@ -789,20 +789,24 @@ bool TrackQueue::updateTracks(uint32_t requestedPosition, bool initial) {
   } else if (!preloadedTracks.empty() && preloadedTracks[0]->loading) {
     // try to not re-load track if we are still loading it
 
-    // remove everything except first track
-    keepOnlyFirstQueuedTrackCooperative(preloadedTracks);
+    // Keep the active loader, but retire speculative tracks outside the lock.
+    while (preloadedTracks.size() > 1) {
+      retiredTracks.push_back(std::move(preloadedTracks.back()));
+      preloadedTracks.pop_back();
+    }
 
     CSPOT_LOG(info, "Keeping current track %d", currentTracksIndex);
 
     cleared = false;
   } else {
-    // Clear preloaded tracks
-    clearQueuedTracksCooperative(preloadedTracks);
+    retiredTracks.swap(preloadedTracks);
 
     // Push a song on the preloaded queue
     CSPOT_LOG(info, "Re-loading current track");
     queueNextTrack(0, requestedPosition);
   }
 
+  lock.unlock();
+  clearQueuedTracksCooperative(retiredTracks);
   return cleared;
 }

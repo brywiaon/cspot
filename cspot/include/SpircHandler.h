@@ -55,7 +55,7 @@ class SpircHandler {
   bool nextSong();
 
   void notifyAudioReachedPlayback();
-  void notifyAudioEnded();
+  void notifyAudioEnded(uint32_t finalPositionMs);
   void updatePositionMs(uint32_t position);
   void setRemoteVolume(int volume);
   void loadTrackFromURI(const std::string& uri);
@@ -72,10 +72,7 @@ class SpircHandler {
   PositionProvider positionProvider = nullptr;
 
   std::shared_ptr<cspot::PlaybackState> playbackState;
-  unsigned long long lastSkipCommandMs = 0;
   unsigned long long lastVolumeActivityMs = 0;
-  unsigned long long lastVolumeSkipSuppressedLogMs = 0;
-  unsigned long long lastRemoteNextGuardMs = 0;
   unsigned long long lastEofRejectMs = 0;
   std::string lastEofRejectTrackUri;
   bool suppressNextPlaybackStart = false;
@@ -86,10 +83,7 @@ class SpircHandler {
   void sendEvent(EventType type, EventData data);
 
   bool skipSong(TrackQueue::SkipDirection dir);
-  bool acceptSkipCommand();
   void noteVolumeActivity();
-  bool suppressRemoteSkipAfterVolume(const char* source);
-  bool suppressUnexpectedRemoteNext();
   bool suppressPlaybackStartAfterEofReject(const std::shared_ptr<QueuedTrack>& track);
   std::string currentPlayingTrackUri() const;
   void handleFrame(std::vector<uint8_t>& data);

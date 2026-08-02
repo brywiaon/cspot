@@ -31,7 +31,7 @@
 
 static constexpr uint32_t INITIAL_HANDOFF_SEEK_BYPASS_MS = 0;
 static constexpr uint32_t PCM_RATE_LOG_INTERVAL_MS = 3000;
-static constexpr size_t PCM_PRODUCER_YIELD_BYTES = 8 * 1024 * 1024;
+static constexpr size_t PCM_PRODUCER_YIELD_BYTES = 64 * 1024;
 
 namespace cspot {
 struct Context;
@@ -92,7 +92,7 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
     // Decode/network production belongs on Core 0. Core 1 is reserved for the
     // bridge's high-priority PCM/I2S consumer so Vorbis and PSRAM bursts can
     // never delay the speaker clock.
-    : bell::Task("cspot_player", 64 * 1024, 5, 0) {
+    : bell::Task("cspot_player", 64 * 1024, 11, 0) {
   this->ctx = ctx;
   this->eofCallback = eof;
   this->trackLoaded = trackLoaded;
@@ -140,6 +140,7 @@ void TrackPlayer::resetState(bool paused) {
   // Mark for reset
   this->currentSongPlaying = false;
   this->pendingSeekPositionMs = 0;
+  this->pendingSeekRequested = false;
   this->startPaused = paused;
   this->pendingReset = true;
   CDNAudioFile::abortActiveStream();
@@ -150,8 +151,10 @@ void TrackPlayer::resetState(bool paused) {
 }
 
 void TrackPlayer::seekMs(size_t ms) {
-  CSPOT_LOG(info, "Seeking...");
-  this->pendingSeekPositionMs = ms;
+  CSPOT_LOG(info, "Seek requested pos=%u", (unsigned)ms);
+  this->pendingSeekPositionMs.store(ms, std::memory_order_release);
+  this->pendingSeekRequested.store(true, std::memory_order_release);
+  CDNAudioFile::interruptActiveStreamForSeek();
 }
 
 void TrackPlayer::runTask() {
@@ -259,14 +262,13 @@ void TrackPlayer::runTask() {
         continue;
       }
 
-      if (trackOffset == 0 && pendingSeekPositionMs == 0) {
+      if (trackOffset == 0 && !pendingSeekRequested.load(std::memory_order_acquire)) {
         this->trackLoaded(track, startPaused);
         startPaused = false;
       }
 
-      if (pendingSeekPositionMs > 0) {
-        track->requestedPosition = pendingSeekPositionMs;
-        pendingSeekPositionMs = 0;
+      if (pendingSeekRequested.exchange(false, std::memory_order_acq_rel)) {
+        track->requestedPosition = pendingSeekPositionMs.load(std::memory_order_acquire);
       }
 
       bool vorbisSeekableOpen = track->requestedPosition > 0;
@@ -308,19 +310,34 @@ void TrackPlayer::runTask() {
 
       while (!eof && currentSongPlaying) {
         // Execute seek if needed
-        if (pendingSeekPositionMs > 0) {
-          uint32_t seekPosition = pendingSeekPositionMs;
-
-          // Reset the pending seek position
-          pendingSeekPositionMs = 0;
+        if (pendingSeekRequested.exchange(false, std::memory_order_acq_rel)) {
+          uint32_t seekPosition =
+              (uint32_t)pendingSeekPositionMs.load(std::memory_order_acquire);
 
           if (!vorbisSeekableOpen) {
-            track->requestedPosition = seekPosition;
-            retryCurrentTrack = true;
-            retryCurrentTrackFast = true;
-            currentSongPlaying = false;
-            eof = false;
-            break;
+            // Normal playback opens in streaming mode for fast startup. On
+            // the first seek, reopen the existing cached CDN file with seek
+            // callbacks instead of reloading the whole queue entry.
+            ov_clear(&vorbisFile);
+            currentTrackStream->seek(0);
+            auto reopenStartedAt = cspotPlayerNowMs();
+            int32_t reopenResult =
+                ov_open_callbacks(this, &vorbisFile, NULL, 0, vorbisCallbacks);
+            CSPOT_LOG(info, "Seekable reopen result=%d dt=%u pos=%u",
+                      (int)reopenResult,
+                      (unsigned)(cspotPlayerNowMs() - reopenStartedAt),
+                      (unsigned)seekPosition);
+            (void)reopenStartedAt;
+            if (reopenResult < 0) {
+              vorbisFile = {};
+              track->requestedPosition = seekPosition;
+              retryCurrentTrack = true;
+              retryCurrentTrackFast = true;
+              currentSongPlaying = false;
+              eof = false;
+              break;
+            }
+            vorbisSeekableOpen = true;
           }
 
           track->requestedPosition = seekPosition;
@@ -335,6 +352,12 @@ void TrackPlayer::runTask() {
                                pcmBuffer.size(), &currentSection);
         uint32_t vorbisReadDtMs = trackPlayerNowMs() - vorbisReadStartMs;
         decoderIdleMs += vorbisReadDtMs;
+
+        // A seek may have aborted the range read above. Handle the latest
+        // target at the top of the loop instead of treating that abort as EOF.
+        if (pendingSeekRequested.load(std::memory_order_acquire)) {
+          continue;
+        }
 
         if (ret == 0) {
           size_t streamPosition = currentTrackStream ? currentTrackStream->getPosition() : 0;
@@ -405,14 +428,17 @@ void TrackPlayer::runTask() {
                                        track->identifier);
               }
               if (written == 0) {
-                taskYIELD();
+                vTaskDelay(1);
               }
               toWrite -= written;
             }
           }
           if (decodedBytesSinceYield >= PCM_PRODUCER_YIELD_BYTES) {
             decodedBytesSinceYield = 0;
-            taskYIELD();
+            // A yield cannot schedule IDLE0 while this task remains the
+            // highest-priority ready task. One tick prevents watchdog and
+            // network starvation without changing decoder or PCM timing.
+            vTaskDelay(1);
           }
         }
 

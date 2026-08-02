@@ -32,6 +32,7 @@ using namespace cspot;
 
 namespace {
 std::atomic<CDNAudioFile*> g_activeCdnAudioFile{nullptr};
+std::mutex g_activeCdnAudioFileMutex;
 
 size_t readHttpStreamYielding(std::iostream& stream, uint8_t* dst,
                               size_t bytes, std::atomic<bool>* abortFlag = nullptr) {
@@ -81,16 +82,20 @@ CDNAudioFile::CDNAudioFile(const std::string& cdnUrl,
 }
 
 CDNAudioFile::~CDNAudioFile() {
+  // Remove this object from the cross-task interrupt registry before its
+  // connections begin tearing down.
+  unregisterActiveStream();
   abort();
   cancelPrefetch(true);
-  unregisterActiveStream();
 }
 
 void CDNAudioFile::registerActiveStream() {
+  std::lock_guard<std::mutex> lock(g_activeCdnAudioFileMutex);
   g_activeCdnAudioFile.store(this);
 }
 
 void CDNAudioFile::unregisterActiveStream() {
+  std::lock_guard<std::mutex> lock(g_activeCdnAudioFileMutex);
   CDNAudioFile* expected = this;
   g_activeCdnAudioFile.compare_exchange_strong(expected, nullptr);
 }
@@ -111,9 +116,27 @@ void CDNAudioFile::abort() {
 }
 
 void CDNAudioFile::abortActiveStream() {
+  std::lock_guard<std::mutex> lock(g_activeCdnAudioFileMutex);
   CDNAudioFile* active = g_activeCdnAudioFile.load();
   if (active) {
     active->abort();
+  }
+}
+
+void CDNAudioFile::interruptForSeek() {
+  // Break only the current HTTP reads. Unlike abort(), this keeps the decoded
+  // file object reusable so TrackPlayer can reopen Vorbis at the new offset.
+  if (httpConnection) {
+    httpConnection->abortNow();
+  }
+  cancelPrefetch(false);
+}
+
+void CDNAudioFile::interruptActiveStreamForSeek() {
+  std::lock_guard<std::mutex> lock(g_activeCdnAudioFileMutex);
+  CDNAudioFile* active = g_activeCdnAudioFile.load();
+  if (active) {
+    active->interruptForSeek();
   }
 }
 

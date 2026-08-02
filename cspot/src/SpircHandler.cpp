@@ -78,6 +78,7 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
       return;
     }
     if (trackQueue->isFinished()) {
+      notifyAudioEnded(durationMs > 0 ? durationMs : decodedMs);
       sendEvent(EventType::DEPLETED);
       return;
     }
@@ -149,10 +150,10 @@ void SpircHandler::subscribeToMercury() {
 
 void SpircHandler::loadTrackFromURI(const std::string& uri) {}
 
-void SpircHandler::notifyAudioEnded() {
-  playbackState->updatePositionMs(0);
+void SpircHandler::notifyAudioEnded(uint32_t finalPositionMs) {
+  playbackState->updatePositionMs(finalPositionMs);
+  playbackState->setPlaybackState(PlaybackState::State::Paused);
   notify();
-  trackPlayer->resetState(true);
 }
 
 bool SpircHandler::suppressPlaybackStartAfterEofReject(
@@ -253,14 +254,6 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
       setPause(false);
       break;
     case MessageType_kMessageTypeNext:
-      if (suppressRemoteSkipAfterVolume("NEXT")) {
-        this->notify();
-        break;
-      }
-      if (suppressUnexpectedRemoteNext()) {
-        this->notify();
-        break;
-      }
       CSPOT_LOG(info, "Remote NEXT accepted pos=%u idx=%d volumeAgeMs=%llu",
                 (unsigned)playbackState->innerFrame.state.position_ms,
                 (int)playbackState->innerFrame.state.playing_track_index,
@@ -270,10 +263,6 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
       }
       break;
     case MessageType_kMessageTypePrev:
-      if (suppressRemoteSkipAfterVolume("PREV")) {
-        this->notify();
-        break;
-      }
       CSPOT_LOG(info, "Remote PREV accepted pos=%u idx=%d volumeAgeMs=%llu",
                 (unsigned)playbackState->innerFrame.state.position_ms,
                 (int)playbackState->innerFrame.state.playing_track_index,
@@ -317,14 +306,15 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
 
       playbackState->setActive(true);
 
-      playbackState->updatePositionMs(0);
+      playbackState->updatePositionMs(requestedPosition);
       playbackState->setPlaybackState(PlaybackState::State::Playing);
 
       playbackState->syncWithRemote();
 
-      // New-track LOAD frames must not perform expensive initial Vorbis seeks.
-      // Same-track LOAD seeks are handled above as in-place SEEK operations.
-      trackQueue->updateTracks(0, true);
+      // A Connect handoff must begin at Spotify's supplied audible position,
+      // not at the start of the track. The seekable startup path performs this
+      // before any PCM is published.
+      trackQueue->updateTracks(requestedPosition, true);
 
       this->notify();
 
@@ -382,11 +372,6 @@ void SpircHandler::notify() {
 }
 
 bool SpircHandler::skipSong(TrackQueue::SkipDirection dir) {
-  if (!acceptSkipCommand()) {
-    CSPOT_LOG(info, "Skip command debounced");
-    return false;
-  }
-
   bool skipped = trackQueue->skipTrack(dir);
   CSPOT_LOG(info, "Manual skip command dir=%s result=%d",
             dir == TrackQueue::SkipDirection::NEXT ? "NEXT" : "PREV",
@@ -407,75 +392,8 @@ bool SpircHandler::previousSong() {
   return skipSong(TrackQueue::SkipDirection::PREV);
 }
 
-bool SpircHandler::acceptSkipCommand() {
-  unsigned long long now = getCurrentTimestamp();
-  if (lastSkipCommandMs > 0 && now >= lastSkipCommandMs &&
-      now - lastSkipCommandMs < 350) {
-    return false;
-  }
-  lastSkipCommandMs = now;
-  return true;
-}
-
 void SpircHandler::noteVolumeActivity() {
   lastVolumeActivityMs = getCurrentTimestamp();
-}
-
-bool SpircHandler::suppressRemoteSkipAfterVolume(const char* source) {
-  unsigned long long now = getCurrentTimestamp();
-  if (lastVolumeActivityMs == 0 || now < lastVolumeActivityMs ||
-      now - lastVolumeActivityMs > 15000) {
-    return false;
-  }
-
-  if (lastVolumeSkipSuppressedLogMs == 0 ||
-      now < lastVolumeSkipSuppressedLogMs ||
-      now - lastVolumeSkipSuppressedLogMs > 1000) {
-    CSPOT_LOG(info, "Suppressed remote %s during volume activity", source);
-    lastVolumeSkipSuppressedLogMs = now;
-  }
-  return true;
-}
-
-bool SpircHandler::suppressUnexpectedRemoteNext() {
-  uint32_t positionMs =
-      playbackState->innerFrame.state.has_position_ms
-          ? playbackState->innerFrame.state.position_ms
-          : 0;
-  if (playbackState->innerFrame.state.has_position_measured_at &&
-      playbackState->innerFrame.state.status == PlayStatus_kPlayStatusPlay) {
-    uint32_t measuredAt =
-        playbackState->innerFrame.state.position_measured_at;
-    uint32_t nowSynced = ctx->timeProvider->getSyncedTimestamp();
-    if (nowSynced >= measuredAt) {
-      positionMs += nowSynced - measuredAt;
-    }
-  }
-
-  if (positionMs < 15000) {
-    lastRemoteNextGuardMs = 0;
-    return false;
-  }
-
-  unsigned long long now = getCurrentTimestamp();
-  if (lastRemoteNextGuardMs > 0 && now >= lastRemoteNextGuardMs &&
-      now - lastRemoteNextGuardMs < 2500) {
-    CSPOT_LOG(error,
-              "Remote NEXT guard bypassed by repeat pos=%u localIdx=%d remoteIdx=%d",
-              (unsigned)positionMs,
-              (int)playbackState->innerFrame.state.playing_track_index,
-              (int)playbackState->remoteFrame.state.playing_track_index);
-    lastRemoteNextGuardMs = 0;
-    return false;
-  }
-
-  lastRemoteNextGuardMs = now;
-  CSPOT_LOG(error,
-            "Suppressed suspicious remote NEXT pos=%u localIdx=%d remoteIdx=%d",
-            (unsigned)positionMs,
-            (int)playbackState->innerFrame.state.playing_track_index,
-            (int)playbackState->remoteFrame.state.playing_track_index);
-  return true;
 }
 
 std::shared_ptr<TrackPlayer> SpircHandler::getTrackPlayer() {

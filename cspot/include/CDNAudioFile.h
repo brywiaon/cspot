@@ -64,6 +64,7 @@ class CDNAudioFile {
   void seek(size_t position);
   void abort();
   static void abortActiveStream();
+  static void interruptActiveStreamForSeek();
 
  private:
   const int OPUS_HEADER_SIZE = 8 * 1024;
@@ -123,6 +124,7 @@ class CDNAudioFile {
   std::vector<uint8_t> audioKey;
 
   void decrypt(uint8_t* dst, size_t nbytes, size_t pos);
+  void interruptForSeek();
   void registerActiveStream();
   void unregisterActiveStream();
   size_t fetchRangeSync(size_t requestPosition, size_t requestSize,

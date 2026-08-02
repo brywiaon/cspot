@@ -26,17 +26,31 @@ std::string ApResolve::fetchFirstApAddress() {
   }
 
   auto request = bell::HTTPClient::get("https://apresolve.spotify.com/");
+  if (!request || request->status() < 200 || request->status() >= 300) {
+    return {};
+  }
   std::string_view responseStr = request->body();
+  if (responseStr.empty()) return {};
 
   // parse json with nlohmann
 #ifdef BELL_ONLY_CJSON
-  cJSON* json = cJSON_Parse(responseStr.data());
-  auto ap_string = std::string(
-      cJSON_GetArrayItem(cJSON_GetObjectItem(json, "ap_list"), 0)->valuestring);
+  cJSON* json = cJSON_ParseWithLength(responseStr.data(), responseStr.size());
+  cJSON* list = json ? cJSON_GetObjectItem(json, "ap_list") : nullptr;
+  cJSON* first = list ? cJSON_GetArrayItem(list, 0) : nullptr;
+  if (!cJSON_IsString(first) || !first->valuestring) {
+    cJSON_Delete(json);
+    return {};
+  }
+  auto ap_string = std::string(first->valuestring);
   cJSON_Delete(json);
   return ap_string;
 #else
-  auto json = nlohmann::json::parse(responseStr);
-  return json["ap_list"][0];
+  auto json = nlohmann::json::parse(responseStr, nullptr, false);
+  if (json.is_discarded() || !json.contains("ap_list") ||
+      !json["ap_list"].is_array() || json["ap_list"].empty() ||
+      !json["ap_list"][0].is_string()) {
+    return {};
+  }
+  return json["ap_list"][0].get<std::string>();
 #endif
 }

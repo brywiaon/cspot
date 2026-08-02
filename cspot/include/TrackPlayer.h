@@ -86,7 +86,7 @@ class TrackPlayer : bell::Task {
   int currentSection;
 
   std::vector<uint8_t, bell::PsramAllocator<uint8_t>> pcmBuffer =
-      std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(1024 * 1024);
+      std::vector<uint8_t, bell::PsramAllocator<uint8_t>>(64 * 1024);
 
   bool autoStart = false;
 
@@ -94,6 +94,7 @@ class TrackPlayer : bell::Task {
   std::atomic<bool> pendingReset = false;
   std::atomic<bool> inFuture = false;
   std::atomic<size_t> pendingSeekPositionMs = 0;
+  std::atomic<bool> pendingSeekRequested = false;
   std::atomic<bool> startPaused = false;
 
   std::mutex runningMutex;

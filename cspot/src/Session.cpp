@@ -81,6 +81,10 @@ void Session::connectWithRandomAp() {
   auto apResolver = std::make_unique<ApResolve>("");
 
   auto apAddr = apResolver->fetchFirstApAddress();
+  if (apAddr.empty()) {
+    CSPOT_LOG(error, "Spotify AP resolve failed; reconnect will retry");
+    return;
+  }
 
   for (int attempt = 0; attempt < 3; attempt++) {
     auto conn = std::make_unique<cspot::PlainConnection>();
