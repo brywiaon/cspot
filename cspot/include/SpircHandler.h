@@ -3,6 +3,7 @@
 #include <stdint.h>    // for uint32_t, uint8_t
 #include <functional>  // for function
 #include <memory>      // for shared_ptr, unique_ptr
+#include <mutex>       // for recursive_mutex
 #include <string>      // for string
 #include <variant>     // for variant
 #include <vector>      // for vector
@@ -76,6 +77,7 @@ class SpircHandler {
   unsigned long long lastEofRejectMs = 0;
   std::string lastEofRejectTrackUri;
   bool suppressNextPlaybackStart = false;
+  std::recursive_mutex transitionMutex;
 
   void sendCmd(MessageType typ);
 

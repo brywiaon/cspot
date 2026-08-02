@@ -128,7 +128,7 @@ class TrackQueue : public bell::Task {
 
   int16_t currentTracksIndex = -1;
 
-  bool isRunning = false;
+  std::atomic<bool> isRunning{false};
 
   void processTrack(std::shared_ptr<QueuedTrack> track);
   bool queueNextTrack(int offset = 0, uint32_t positionMs = 0);

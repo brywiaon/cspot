@@ -27,6 +27,7 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
 
   auto EOFCallback = [this](uint32_t decodedMs, uint32_t durationMs,
                             size_t streamPosition, size_t streamSize) {
+    std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
     constexpr uint32_t eofSlackMs = 250;
     std::string currentTrackUri;
     int currentTrackIndex = playbackState->innerFrame.state.has_playing_track_index
@@ -177,6 +178,7 @@ std::string SpircHandler::currentPlayingTrackUri() const {
 }
 
 void SpircHandler::notifyAudioReachedPlayback() {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   int offset = 0;
 
   // get HEAD track
@@ -207,12 +209,14 @@ void SpircHandler::updatePositionMs(uint32_t position) {
 }
 
 void SpircHandler::disconnect() {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   this->trackQueue->stopTask();
   this->trackPlayer->stop();
   this->ctx->session->disconnect();
 }
 
 void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   // Decode received spirc frame
   playbackState->decodeRemoteFrame(data);
 
@@ -372,6 +376,7 @@ void SpircHandler::notify() {
 }
 
 bool SpircHandler::skipSong(TrackQueue::SkipDirection dir) {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   bool skipped = trackQueue->skipTrack(dir);
   CSPOT_LOG(info, "Manual skip command dir=%s result=%d",
             dir == TrackQueue::SkipDirection::NEXT ? "NEXT" : "PREV",
@@ -420,6 +425,7 @@ void SpircHandler::setPositionProvider(PositionProvider provider) {
 }
 
 void SpircHandler::setPause(bool isPaused) {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   // The bridge tracks PCM that has actually reached the speaker. Anchor SPIRC
   // to that audible position before publishing a pause/resume transition.
   if (positionProvider && playbackState->isActive()) {

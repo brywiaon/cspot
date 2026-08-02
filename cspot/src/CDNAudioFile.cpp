@@ -33,6 +33,12 @@ using namespace cspot;
 namespace {
 std::atomic<CDNAudioFile*> g_activeCdnAudioFile{nullptr};
 std::mutex g_activeCdnAudioFileMutex;
+std::atomic<uint32_t> g_activeCdnNetworkIo{0};
+
+struct CdnNetworkIoScope {
+  CdnNetworkIoScope() { g_activeCdnNetworkIo.fetch_add(1, std::memory_order_acq_rel); }
+  ~CdnNetworkIoScope() { g_activeCdnNetworkIo.fetch_sub(1, std::memory_order_acq_rel); }
+};
 
 size_t readHttpStreamYielding(std::iostream& stream, uint8_t* dst,
                               size_t bytes, std::atomic<bool>* abortFlag = nullptr) {
@@ -102,8 +108,11 @@ void CDNAudioFile::unregisterActiveStream() {
 
 void CDNAudioFile::abort() {
   abortRequested = true;
-  if (httpConnection) {
-    httpConnection->abortNow();
+  {
+    std::lock_guard<std::mutex> lock(httpMutex);
+    if (httpConnection) {
+      httpConnection->abortNow();
+    }
   }
 #ifdef ESP_PLATFORM
   {
@@ -126,8 +135,11 @@ void CDNAudioFile::abortActiveStream() {
 void CDNAudioFile::interruptForSeek() {
   // Break only the current HTTP reads. Unlike abort(), this keeps the decoded
   // file object reusable so TrackPlayer can reopen Vorbis at the new offset.
-  if (httpConnection) {
-    httpConnection->abortNow();
+  {
+    std::lock_guard<std::mutex> lock(httpMutex);
+    if (httpConnection) {
+      httpConnection->abortNow();
+    }
   }
   cancelPrefetch(false);
 }
@@ -138,6 +150,10 @@ void CDNAudioFile::interruptActiveStreamForSeek() {
   if (active) {
     active->interruptForSeek();
   }
+}
+
+bool CDNAudioFile::hasActiveNetworkIo() {
+  return g_activeCdnNetworkIo.load(std::memory_order_acquire) != 0;
 }
 
 size_t CDNAudioFile::getPosition() {
@@ -152,18 +168,25 @@ void CDNAudioFile::seek(size_t newPos) {
 }
 
 void CDNAudioFile::openStream() {
+  CdnNetworkIoScope networkIo;
   abortRequested = false;
   registerActiveStream();
   CSPOT_LOG(info, "Opening HTTP stream to %s", this->cdnUrl.c_str());
 
   // Open connection, read first 128 bytes
-  this->httpConnection = bell::HTTPClient::get(
-      this->cdnUrl,
-      {bell::HTTPClient::RangeHeader::range(0, OPUS_HEADER_SIZE - 1)});
+  {
+    auto response = bell::HTTPClient::get(
+        this->cdnUrl,
+        {bell::HTTPClient::RangeHeader::range(0, OPUS_HEADER_SIZE - 1)});
+    std::lock_guard<std::mutex> lock(httpMutex);
+    this->httpConnection = std::move(response);
+  }
   if (!responseOk(this->httpConnection)) {
     CSPOT_LOG(error, "CDN header request failed: status=%d",
               this->httpConnection ? this->httpConnection->status() : -1);
     this->totalFileSize = 0;
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return;
   }
 
@@ -171,6 +194,8 @@ void CDNAudioFile::openStream() {
       readHttpStreamYielding(this->httpConnection->stream(), header.data(),
                              OPUS_HEADER_SIZE, &abortRequested) != OPUS_HEADER_SIZE) {
     this->totalFileSize = 0;
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return;
   }
   CSPOT_LOG(info, "Header bytes received");
@@ -181,6 +206,8 @@ void CDNAudioFile::openStream() {
     CSPOT_LOG(error, "Invalid CDN total length: %u",
               (unsigned)this->httpConnection->totalLength());
     this->totalFileSize = 0;
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return;
   }
 
@@ -193,12 +220,18 @@ void CDNAudioFile::openStream() {
 
   this->footer.resize(this->totalFileSize - footerStartLocation +
                       SPOTIFY_OPUS_HEADER);
-  this->httpConnection = bell::HTTPClient::get(
-      cdnUrl, {bell::HTTPClient::RangeHeader::last(footer.size())});
+  {
+    auto response = bell::HTTPClient::get(
+        cdnUrl, {bell::HTTPClient::RangeHeader::last(footer.size())});
+    std::lock_guard<std::mutex> lock(httpMutex);
+    this->httpConnection = std::move(response);
+  }
   if (!responseOk(this->httpConnection)) {
     CSPOT_LOG(error, "CDN footer request failed: status=%d",
               this->httpConnection ? this->httpConnection->status() : -1);
     this->totalFileSize = 0;
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return;
   }
 
@@ -206,6 +239,8 @@ void CDNAudioFile::openStream() {
       readHttpStreamYielding(this->httpConnection->stream(), footer.data(),
                              this->footer.size(), &abortRequested) != this->footer.size()) {
     this->totalFileSize = 0;
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return;
   }
 
@@ -216,21 +251,32 @@ void CDNAudioFile::openStream() {
   this->lastRequestCapacity = 0;
   this->startupRangeComplete = false;
   cancelPrefetch(true);
+  {
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
+  }
 }
 
 size_t CDNAudioFile::fetchRangeSync(size_t requestPosition, size_t requestSize,
                                     uint8_t* buffer, const char* reason) {
+  CdnNetworkIoScope networkIo;
   if (abortRequested || !buffer || requestSize == 0) {
     return 0;
   }
 
-  this->httpConnection = bell::HTTPClient::get(
-      cdnUrl, {bell::HTTPClient::RangeHeader::range(
-                  requestPosition, requestPosition + requestSize - 1)});
+  {
+    auto response = bell::HTTPClient::get(
+        cdnUrl, {bell::HTTPClient::RangeHeader::range(
+                    requestPosition, requestPosition + requestSize - 1)});
+    std::lock_guard<std::mutex> lock(httpMutex);
+    this->httpConnection = std::move(response);
+  }
   if (!responseOk(this->httpConnection)) {
     CSPOT_LOG(error, "CDN %s range request failed: status=%d",
               reason ? reason : "audio",
               this->httpConnection ? this->httpConnection->status() : -1);
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return 0;
   }
 
@@ -242,6 +288,8 @@ size_t CDNAudioFile::fetchRangeSync(size_t requestPosition, size_t requestSize,
   uint32_t readStartMs = cdnNowMs();
   if (readHttpStreamYielding(this->httpConnection->stream(), buffer, capacity,
                              &abortRequested) != capacity) {
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
     return 0;
   }
   uint32_t readDtMs = cdnNowMs() - readStartMs;
@@ -249,6 +297,10 @@ size_t CDNAudioFile::fetchRangeSync(size_t requestPosition, size_t requestSize,
     CSPOT_LOG(error, "Slow CDN %s range read bytes=%u dt=%u pos=%u",
               reason ? reason : "audio", (unsigned)capacity,
               (unsigned)readDtMs, (unsigned)requestPosition);
+  }
+  {
+    std::lock_guard<std::mutex> lock(httpMutex);
+    httpConnection.reset();
   }
   return capacity;
 }
@@ -283,8 +335,14 @@ void CDNAudioFile::startNextPrefetch() {
   CSPOT_LOG(info, "Prefetch started pos=%u bytes=%u",
             (unsigned)nextPosition, (unsigned)HTTP_BUFFER_SIZE);
 
+  // The worker must own the stream for its entire lifetime. A raw `this`
+  // allowed skip/reset to destroy CDNAudioFile while an aborted TLS read was
+  // still unwinding on the prefetch task.
+  auto taskOwner =
+      std::make_unique<std::shared_ptr<CDNAudioFile>>(shared_from_this());
   BaseType_t ok = xTaskCreatePinnedToCore(
-      &CDNAudioFile::prefetchTaskEntry, "cdn_prefetch", 24 * 1024, this, 9,
+      &CDNAudioFile::prefetchTaskEntry, "cdn_prefetch", 24 * 1024,
+      taskOwner.get(), 9,
       &prefetchTask, 0);
   if (ok != pdPASS) {
     std::lock_guard<std::mutex> lock(prefetchMutex);
@@ -292,6 +350,8 @@ void CDNAudioFile::startNextPrefetch() {
     prefetchFailed = true;
     prefetchTask = nullptr;
     CSPOT_LOG(error, "Failed to start CDN prefetch task");
+  } else {
+    taskOwner.release();
   }
 #endif
 #endif
@@ -399,11 +459,18 @@ void CDNAudioFile::cancelPrefetch(bool waitForTask) {
 
 #ifdef ESP_PLATFORM
 void CDNAudioFile::prefetchTaskEntry(void* arg) {
-  static_cast<CDNAudioFile*>(arg)->runPrefetchTask();
+  std::unique_ptr<std::shared_ptr<CDNAudioFile>> owner(
+      static_cast<std::shared_ptr<CDNAudioFile>*>(arg));
+  auto stream = *owner;
+  owner.reset();
+  stream->runPrefetchTask();
+  // vTaskDelete() does not perform C++ stack unwinding.
+  stream.reset();
   vTaskDelete(nullptr);
 }
 
 void CDNAudioFile::runPrefetchTask() {
+  CdnNetworkIoScope networkIo;
   size_t requestPosition = 0;
   {
     std::lock_guard<std::mutex> lock(prefetchMutex);

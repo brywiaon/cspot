@@ -519,6 +519,7 @@ TrackQueue::~TrackQueue() {
 }
 
 TrackInfo TrackQueue::getTrackInfo(std::string_view identifier) {
+  std::scoped_lock lock(tracksMutex);
   for (auto& track : preloadedTracks) {
     if (track->identifier == identifier)
       return track->trackInfo;
@@ -536,14 +537,13 @@ void TrackQueue::runTask() {
   while (isRunning) {
     processSemaphore->twait(100);
 
-    int loadedIndex = currentTracksIndex;
-
-    // No tracks loaded yet
-    if (loadedIndex < 0) {
-      continue;
-    } else {
+    {
       std::scoped_lock lock(tracksMutex);
-
+      // Snapshot the queue and index together. Skip/update may replace both
+      // from another task, so neither may be observed outside this lock.
+      if (currentTracksIndex < 0) {
+        continue;
+      }
       clearQueuedTracksCooperative(trackQueue);
       trackQueue = preloadedTracks;
     }
@@ -635,7 +635,11 @@ void TrackQueue::processTrack(std::shared_ptr<QueuedTrack> track) {
       track->stepLoadCDNUrl(accessKey);
 
       if (track->state == QueuedTrack::State::READY) {
-        if (preloadedTracks.size() < MAX_TRACKS_PRELOAD) {
+        std::scoped_lock lock(tracksMutex);
+        const bool stillQueued =
+            std::find(preloadedTracks.begin(), preloadedTracks.end(), track) !=
+            preloadedTracks.end();
+        if (stillQueued && preloadedTracks.size() < MAX_TRACKS_PRELOAD) {
           // Queue a new track to preload
           queueNextTrack(preloadedTracks.size());
         }

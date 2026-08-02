@@ -26,7 +26,7 @@ class AccessKeyFetcher;
 
 #define CSPOT_ENABLE_PREFETCH 1
 
-class CDNAudioFile {
+class CDNAudioFile : public std::enable_shared_from_this<CDNAudioFile> {
 
  public:
   CDNAudioFile(const std::string& cdnUrl, const std::vector<uint8_t>& audioKey);
@@ -65,6 +65,7 @@ class CDNAudioFile {
   void abort();
   static void abortActiveStream();
   static void interruptActiveStreamForSeek();
+  static bool hasActiveNetworkIo();
 
  private:
   const int OPUS_HEADER_SIZE = 8 * 1024;
@@ -97,6 +98,7 @@ class CDNAudioFile {
   std::unique_ptr<Crypto> crypto;
 
   std::unique_ptr<bell::HTTPClient::Response> httpConnection;
+  std::mutex httpMutex;
 
   size_t position = 0;
   size_t totalFileSize = 0;
