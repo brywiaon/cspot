@@ -34,9 +34,24 @@ namespace {
 std::atomic<CDNAudioFile*> g_activeCdnAudioFile{nullptr};
 std::mutex g_activeCdnAudioFileMutex;
 std::atomic<uint32_t> g_activeCdnNetworkIo{0};
+std::atomic<bool> g_externalNetworkIoReserved{false};
 
 struct CdnNetworkIoScope {
-  CdnNetworkIoScope() { g_activeCdnNetworkIo.fetch_add(1, std::memory_order_acq_rel); }
+  CdnNetworkIoScope() {
+    // Admission is double-checked after incrementing so a CDN request and an
+    // external TLS reservation can never both cross the boundary concurrently.
+    for (;;) {
+      while (g_externalNetworkIoReserved.load(std::memory_order_acquire)) {
+        BELL_SLEEP_MS(1);
+      }
+      g_activeCdnNetworkIo.fetch_add(1, std::memory_order_acq_rel);
+      if (!g_externalNetworkIoReserved.load(std::memory_order_acquire)) {
+        break;
+      }
+      g_activeCdnNetworkIo.fetch_sub(1, std::memory_order_acq_rel);
+      BELL_SLEEP_MS(1);
+    }
+  }
   ~CdnNetworkIoScope() { g_activeCdnNetworkIo.fetch_sub(1, std::memory_order_acq_rel); }
 };
 
@@ -154,6 +169,23 @@ void CDNAudioFile::interruptActiveStreamForSeek() {
 
 bool CDNAudioFile::hasActiveNetworkIo() {
   return g_activeCdnNetworkIo.load(std::memory_order_acquire) != 0;
+}
+
+bool CDNAudioFile::tryAcquireExternalNetworkIo() {
+  bool expected = false;
+  if (!g_externalNetworkIoReserved.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    return false;
+  }
+  if (g_activeCdnNetworkIo.load(std::memory_order_acquire) == 0) {
+    return true;
+  }
+  g_externalNetworkIoReserved.store(false, std::memory_order_release);
+  return false;
+}
+
+void CDNAudioFile::releaseExternalNetworkIo() {
+  g_externalNetworkIoReserved.store(false, std::memory_order_release);
 }
 
 size_t CDNAudioFile::getPosition() {

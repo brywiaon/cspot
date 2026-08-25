@@ -66,6 +66,8 @@ class CDNAudioFile : public std::enable_shared_from_this<CDNAudioFile> {
   static void abortActiveStream();
   static void interruptActiveStreamForSeek();
   static bool hasActiveNetworkIo();
+  static bool tryAcquireExternalNetworkIo();
+  static void releaseExternalNetworkIo();
 
  private:
   const int OPUS_HEADER_SIZE = 8 * 1024;
