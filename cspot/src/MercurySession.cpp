@@ -77,38 +77,34 @@ void MercurySession::runTask() {
 void MercurySession::reconnect() {
   isReconnecting = true;
 
-  try {
-    this->conn = nullptr;
-    this->shanConn = nullptr;
+  // A network outage may last for hours. Retrying recursively grows this
+  // task's stack once per attempt and eventually kills Spotify Connect.
+  while (isRunning) {
+    try {
+      this->conn = nullptr;
+      this->shanConn = nullptr;
 
-    this->connectWithRandomAp();
-    auto token = this->authenticate(this->authBlob);
-    if (!this->conn || !this->conn->isConnected() || !this->shanConn ||
-        token.empty()) {
-      CSPOT_LOG(error, "Spotify reconnect did not establish a session");
-      BELL_SLEEP_MS(5000);
-      if (isRunning) {
-        return reconnect();
+      this->connectWithRandomAp();
+      auto token = this->authenticate(this->authBlob);
+      if (this->conn && this->conn->isConnected() && this->shanConn &&
+          !token.empty()) {
+        CSPOT_LOG(info, "Reconnection successful");
+        BELL_SLEEP_MS(100);
+        lastPingTimestamp = timeProvider->getSyncedTimestamp();
+        isReconnecting = false;
+        this->executeEstabilishedCallback = true;
+        return;
       }
-      return;
+      CSPOT_LOG(error, "Spotify reconnect did not establish a session");
+    } catch (...) {
+      CSPOT_LOG(error, "Cannot reconnect, will retry in 5s");
     }
 
-    CSPOT_LOG(info, "Reconnection successful");
-
-    BELL_SLEEP_MS(100);
-
-    lastPingTimestamp = timeProvider->getSyncedTimestamp();
-    isReconnecting = false;
-
-    this->executeEstabilishedCallback = true;
-  } catch (...) {
-    CSPOT_LOG(error, "Cannot reconnect, will retry in 5s");
-    BELL_SLEEP_MS(5000);
-
-    if (isRunning) {
-      return reconnect();
+    for (int waitedMs = 0; isRunning && waitedMs < 5000; waitedMs += 100) {
+      BELL_SLEEP_MS(100);
     }
   }
+  isReconnecting = false;
 }
 
 void MercurySession::setConnectedHandler(
