@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>  // for string
+#include <vector>  // for vector
 #ifdef BELL_ONLY_CJSON
 #include "cJSON.h"
 #else
@@ -16,6 +17,12 @@ class ApResolve {
    * @returns std::string Address in form of url:port
    */
   std::string fetchFirstApAddress();
+
+  /**
+   * @brief Fetches every Spotify access point offered by the resolver.
+   * @returns Addresses in host:port form, ordered by Spotify preference.
+   */
+  std::vector<std::string> fetchApAddresses();
 
  private:
   std::string apOverride;

@@ -111,10 +111,20 @@ void PlaybackState::setPlaybackState(const PlaybackState::State state) {
 }
 
 void PlaybackState::syncWithRemote() {
-  innerFrame.state.context_uri = (char*)realloc(
-      innerFrame.state.context_uri, strlen(remoteFrame.state.context_uri) + 1);
-
-  strcpy(innerFrame.state.context_uri, remoteFrame.state.context_uri);
+  const char* remoteContext = remoteFrame.state.context_uri;
+  if (remoteContext == nullptr) {
+    remoteContext = "";
+  }
+  const size_t contextBytes = strlen(remoteContext) + 1;
+  char* resizedContext = static_cast<char*>(
+      realloc(innerFrame.state.context_uri, contextBytes));
+  if (resizedContext == nullptr) {
+    CSPOT_LOG(error, "Unable to allocate %u bytes for playback context",
+              (unsigned)contextBytes);
+    return;
+  }
+  innerFrame.state.context_uri = resizedContext;
+  memcpy(innerFrame.state.context_uri, remoteContext, contextBytes);
 
   innerFrame.state.has_playing_track_index = true;
   innerFrame.state.playing_track_index = remoteFrame.state.playing_track_index;

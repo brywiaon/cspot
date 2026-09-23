@@ -21,8 +21,13 @@ ApResolve::ApResolve(std::string apOverride) {
 }
 
 std::string ApResolve::fetchFirstApAddress() {
+  auto addresses = fetchApAddresses();
+  return addresses.empty() ? std::string{} : addresses.front();
+}
+
+std::vector<std::string> ApResolve::fetchApAddresses() {
   if (apOverride != "") {
-    return apOverride;
+    return {apOverride};
   }
 
   auto request = bell::HTTPClient::get("https://apresolve.spotify.com/");
@@ -32,25 +37,31 @@ std::string ApResolve::fetchFirstApAddress() {
   std::string_view responseStr = request->body();
   if (responseStr.empty()) return {};
 
+  std::vector<std::string> addresses;
+
   // parse json with nlohmann
 #ifdef BELL_ONLY_CJSON
   cJSON* json = cJSON_ParseWithLength(responseStr.data(), responseStr.size());
   cJSON* list = json ? cJSON_GetObjectItem(json, "ap_list") : nullptr;
-  cJSON* first = list ? cJSON_GetArrayItem(list, 0) : nullptr;
-  if (!cJSON_IsString(first) || !first->valuestring) {
-    cJSON_Delete(json);
-    return {};
+  if (cJSON_IsArray(list)) {
+    const int count = cJSON_GetArraySize(list);
+    for (int index = 0; index < count; ++index) {
+      cJSON* item = cJSON_GetArrayItem(list, index);
+      if (cJSON_IsString(item) && item->valuestring && item->valuestring[0]) {
+        addresses.emplace_back(item->valuestring);
+      }
+    }
   }
-  auto ap_string = std::string(first->valuestring);
   cJSON_Delete(json);
-  return ap_string;
 #else
   auto json = nlohmann::json::parse(responseStr, nullptr, false);
   if (json.is_discarded() || !json.contains("ap_list") ||
-      !json["ap_list"].is_array() || json["ap_list"].empty() ||
-      !json["ap_list"][0].is_string()) {
+      !json["ap_list"].is_array()) {
     return {};
   }
-  return json["ap_list"][0].get<std::string>();
+  for (const auto& item : json["ap_list"]) {
+    if (item.is_string()) addresses.push_back(item.get<std::string>());
+  }
 #endif
+  return addresses;
 }

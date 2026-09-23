@@ -34,9 +34,12 @@ std::vector<uint8_t> AuthChallenges::prepareAuthPacket(
   // prepare authentication request proto
   pbPutString(username, authRequest.login_credentials.username);
 
-  std::copy(authData.begin(), authData.end(),
-            authRequest.login_credentials.auth_data.bytes);
-  authRequest.login_credentials.auth_data.size = authData.size();
+  const size_t authBytes =
+      std::min(authData.size(),
+               sizeof(authRequest.login_credentials.auth_data.bytes));
+  std::copy_n(authData.begin(), authBytes,
+              authRequest.login_credentials.auth_data.bytes);
+  authRequest.login_credentials.auth_data.size = authBytes;
 
   authRequest.login_credentials.typ = (AuthenticationType)authType;
   authRequest.system_info.cpu_family = CpuFamily_CPU_UNKNOWN;
@@ -55,6 +58,9 @@ std::vector<uint8_t> AuthChallenges::prepareAuthPacket(
 
 std::vector<uint8_t> AuthChallenges::solveApHello(
     std::vector<uint8_t>& helloPacket, std::vector<uint8_t>& data) {
+  if (data.size() < 4) {
+    return {};
+  }
   // Decode the response
   auto skipSize = std::vector<uint8_t>(data.begin() + 4, data.end());
 

@@ -101,18 +101,23 @@ bool TrackReference::pbDecodeTrackList(pb_istream_t* stream,
           // Handle GID
           if (tag == TrackRef_gid_tag) {
             track.gid.resize(substream.bytes_left);
-            destBuffer = &track.gid[0];
+            destBuffer = track.gid.empty() ? nullptr : track.gid.data();
           } else if (tag == TrackRef_context_tag) {
             track.context.resize(substream.bytes_left);
 
-            destBuffer = reinterpret_cast<uint8_t*>(&track.context[0]);
+            destBuffer = track.context.empty()
+                             ? nullptr
+                             : reinterpret_cast<uint8_t*>(track.context.data());
           } else if (tag == TrackRef_uri_tag) {
             track.uri.resize(substream.bytes_left);
 
-            destBuffer = reinterpret_cast<uint8_t*>(&track.uri[0]);
+            destBuffer = track.uri.empty()
+                             ? nullptr
+                             : reinterpret_cast<uint8_t*>(track.uri.data());
           }
 
-          if (!pb_read(&substream, destBuffer, substream.bytes_left)) {
+          if (substream.bytes_left > 0 &&
+              !pb_read(&substream, destBuffer, substream.bytes_left)) {
             return false;
           }
 

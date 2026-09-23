@@ -136,7 +136,7 @@ void SpircHandler::subscribeToMercury() {
     this->ctx->config.countryCode = this->ctx->session->getCountryCode();
   };
   auto subscriptionLambda = [this](MercurySession::Response& res) {
-    if (res.fail)
+    if (res.fail || res.parts.empty())
       return;
     CSPOT_LOG(debug, "Received subscription response");
 

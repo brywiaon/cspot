@@ -1,5 +1,6 @@
 #include "Session.h"
 
+#include <algorithm>    // for find
 #include <limits.h>     // for CHAR_BIT
 #include <cstdint>      // for uint8_t
 #include <functional>   // for __base
@@ -78,22 +79,37 @@ void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
 }
 
 void Session::connectWithRandomAp() {
+  static std::string lastSuccessfulAp;
   auto apResolver = std::make_unique<ApResolve>("");
 
-  auto apAddr = apResolver->fetchFirstApAddress();
-  if (apAddr.empty()) {
+  auto apAddresses = apResolver->fetchApAddresses();
+  if (apAddresses.empty()) {
     CSPOT_LOG(error, "Spotify AP resolve failed; reconnect will retry");
     return;
   }
 
-  for (int attempt = 0; attempt < 3; attempt++) {
+  // A previously healthy endpoint is worth trying first, but every address
+  // returned by Spotify remains available as an immediate fallback. The old
+  // behavior retried only ap_list[0], so one blocked port looked like a total
+  // Spotify outage even when the resolver supplied working alternatives.
+  auto cached = std::find(apAddresses.begin(), apAddresses.end(),
+                          lastSuccessfulAp);
+  if (cached != apAddresses.end() && cached != apAddresses.begin()) {
+    std::rotate(apAddresses.begin(), cached, cached + 1);
+  }
+
+  CSPOT_LOG(info, "Spotify resolver supplied %u AP endpoints",
+            static_cast<unsigned>(apAddresses.size()));
+  for (size_t attempt = 0; attempt < apAddresses.size(); ++attempt) {
+    const std::string& apAddr = apAddresses[attempt];
     auto conn = std::make_unique<cspot::PlainConnection>();
     conn->timeoutHandler = [this]() {
       return this->triggerTimeout();
     };
 
-    CSPOT_LOG(debug, "Connecting with AP <%s> attempt %d", apAddr.c_str(),
-              attempt + 1);
+    CSPOT_LOG(info, "Connecting with Spotify AP <%s> endpoint %u/%u",
+              apAddr.c_str(), static_cast<unsigned>(attempt + 1),
+              static_cast<unsigned>(apAddresses.size()));
     conn->connect(apAddr);
     if (!conn->isConnected()) {
       continue;
@@ -101,6 +117,7 @@ void Session::connectWithRandomAp() {
 
     this->connect(std::move(conn));
     if (this->shanConn) {
+      lastSuccessfulAp = apAddr;
       return;
     }
   }
@@ -126,7 +143,7 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
   auto packet = this->shanConn->recvPacket();
   switch (packet.command) {
     case AUTH_SUCCESSFUL_COMMAND: {
-      APWelcome welcome;
+      APWelcome welcome = APWelcome_init_zero;
       CSPOT_LOG(debug, "Authorization successful");
       pbDecode(welcome, APWelcome_fields, packet.data);
       return std::vector<uint8_t>(welcome.reusable_auth_credentials.bytes,

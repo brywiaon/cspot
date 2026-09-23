@@ -1,10 +1,11 @@
 #include "PlainConnection.h"
 
 #ifndef _WIN32
+#include <fcntl.h>  // for fcntl, O_NONBLOCK
 #include <netdb.h>  // for addrinfo, freeaddrinfo, getaddrinfo
-#include <netdb.h>
 #include <netinet/in.h>   // for IPPROTO_IP, IPPROTO_TCP
 #include <netinet/tcp.h>  // for TCP_NODELAY
+#include <sys/select.h>   // for select, fd_set
 #include <sys/errno.h>    // for EAGAIN, EINTR, ETIMEDOUT, errno
 #include <sys/socket.h>   // for setsockopt, connect, recv, send, shutdown
 #include <sys/time.h>     // for timeval
@@ -18,6 +19,64 @@
 #include "Utils.h"       // for extract, pack
 
 using namespace cspot;
+
+static int getErrno();
+
+namespace {
+constexpr int SPOTIFY_AP_CONNECT_TIMEOUT_MS = 3000;
+
+bool setSocketBlocking(int socketFd, bool blocking) {
+#ifdef _WIN32
+  u_long mode = blocking ? 0 : 1;
+  return ioctlsocket(socketFd, FIONBIO, &mode) == 0;
+#else
+  int flags = fcntl(socketFd, F_GETFL, 0);
+  if (flags < 0) return false;
+  if (blocking) flags &= ~O_NONBLOCK;
+  else flags |= O_NONBLOCK;
+  return fcntl(socketFd, F_SETFL, flags) == 0;
+#endif
+}
+
+bool connectInProgress(int errorCode) {
+#ifdef _WIN32
+  return errorCode == WSAEWOULDBLOCK || errorCode == WSAEINPROGRESS ||
+         errorCode == WSAEALREADY;
+#else
+  return errorCode == EINPROGRESS || errorCode == EWOULDBLOCK ||
+         errorCode == EAGAIN || errorCode == EALREADY;
+#endif
+}
+
+bool waitForConnectedSocket(int socketFd, int timeoutMs, int& socketError) {
+  fd_set writeSet;
+  fd_set errorSet;
+  FD_ZERO(&writeSet);
+  FD_ZERO(&errorSet);
+  FD_SET(socketFd, &writeSet);
+  FD_SET(socketFd, &errorSet);
+  timeval timeout{};
+  timeout.tv_sec = timeoutMs / 1000;
+  timeout.tv_usec = (timeoutMs % 1000) * 1000;
+  int ready = select(socketFd + 1, nullptr, &writeSet, &errorSet, &timeout);
+  if (ready <= 0) {
+    socketError = ready == 0 ? ETIMEDOUT : getErrno();
+    return false;
+  }
+#ifdef _WIN32
+  int errorLength = sizeof(socketError);
+#else
+  socklen_t errorLength = sizeof(socketError);
+#endif
+  socketError = 0;
+  if (getsockopt(socketFd, SOL_SOCKET, SO_ERROR,
+                 reinterpret_cast<char*>(&socketError), &errorLength) != 0) {
+    socketError = getErrno();
+    return false;
+  }
+  return socketError == 0 && FD_ISSET(socketFd, &writeSet);
+}
+}  // namespace
 
 static int getErrno() {
 #ifdef _WIN32
@@ -42,32 +101,53 @@ PlainConnection::~PlainConnection() {
 
 void PlainConnection::connect(const std::string& apAddress) {
   struct addrinfo h, *airoot, *ai;
-  std::string hostname = apAddress.substr(0, apAddress.find(":"));
-  std::string portStr =
-      apAddress.substr(apAddress.find(":") + 1, apAddress.size());
+  const size_t separator = apAddress.rfind(":");
+  if (separator == std::string::npos || separator == 0 ||
+      separator + 1 >= apAddress.size()) {
+    CSPOT_LOG(error, "Invalid Spotify AP address <%s>", apAddress.c_str());
+    apSock = -1;
+    return;
+  }
+  std::string hostname = apAddress.substr(0, separator);
+  std::string portStr = apAddress.substr(separator + 1);
   memset(&h, 0, sizeof(h));
   h.ai_family = AF_INET;
   h.ai_socktype = SOCK_STREAM;
-  h.ai_protocol = IPPROTO_IP;
+  h.ai_protocol = IPPROTO_TCP;
 
   // Lookup host
-  if (getaddrinfo(hostname.c_str(), portStr.c_str(), &h, &airoot)) {
-    CSPOT_LOG(error, "getaddrinfo failed");
+  int resolveError = getaddrinfo(hostname.c_str(), portStr.c_str(), &h, &airoot);
+  if (resolveError != 0) {
+    CSPOT_LOG(error, "Spotify AP DNS failed host=%s error=%d",
+              hostname.c_str(), resolveError);
     apSock = -1;
     return;
   }
 
   // find the right ai, connect to server
+  int lastError = 0;
   for (ai = airoot; ai; ai = ai->ai_next) {
     if (ai->ai_family != AF_INET && ai->ai_family != AF_INET6)
       continue;
 
     this->apSock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (this->apSock < 0)
+    if (this->apSock < 0) {
+      lastError = getErrno();
       continue;
+    }
 
-    if (::connect(this->apSock, (struct sockaddr*)ai->ai_addr,
-                  ai->ai_addrlen) != -1) {
+    setSocketBlocking(this->apSock, false);
+    int connectResult = ::connect(this->apSock, (struct sockaddr*)ai->ai_addr,
+                                  ai->ai_addrlen);
+    int connectError = connectResult == 0 ? 0 : getErrno();
+    bool connected = connectResult == 0;
+    if (!connected && connectInProgress(connectError)) {
+      connected = waitForConnectedSocket(this->apSock,
+                                         SPOTIFY_AP_CONNECT_TIMEOUT_MS,
+                                         connectError);
+    }
+    setSocketBlocking(this->apSock, true);
+    if (connected) {
 #ifdef _WIN32
       uint32_t tv = 3000;
 #else
@@ -88,6 +168,7 @@ void PlainConnection::connect(const std::string& apAddress) {
                  sizeof(int)); /* length of option value */
       break;
     }
+    lastError = connectError;
 
 #ifdef _WIN32
     closesocket(this->apSock);
@@ -99,9 +180,10 @@ void PlainConnection::connect(const std::string& apAddress) {
 
   freeaddrinfo(airoot);
   if (apSock >= 0) {
-    CSPOT_LOG(debug, "Connected to spotify server");
+    CSPOT_LOG(info, "Connected to Spotify AP <%s>", apAddress.c_str());
   } else {
-    CSPOT_LOG(error, "Can't connect to spotify servers");
+    CSPOT_LOG(error, "Can't connect to Spotify AP <%s> error=%d timeout=%dms",
+              apAddress.c_str(), lastError, SPOTIFY_AP_CONNECT_TIMEOUT_MS);
   }
 }
 
@@ -174,7 +256,7 @@ void PlainConnection::readBlock(const uint8_t* dst, size_t size) {
           }
           goto READ;
         case EINTR:
-          break;
+          goto READ;
         default:
           if (retries++ > 4) {
             close();
@@ -209,7 +291,7 @@ size_t PlainConnection::writeBlock(const std::vector<uint8_t>& data) {
           }
           goto WRITE;
         case EINTR:
-          break;
+          goto WRITE;
         default:
           if (retries++ > 4) {
             close();

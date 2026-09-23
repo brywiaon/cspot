@@ -1,5 +1,6 @@
 #include "TrackPlayer.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <mutex>        // for mutex, scoped_lock
 #include <string>       // for string
@@ -413,10 +414,10 @@ void TrackPlayer::runTask() {
               (uint32_t)(((uint64_t)ret * 1000ULL) / (44100ULL * 2ULL * 2ULL));
           decodedBytesSinceYield += (size_t)ret;
           if (this->dataCallback != nullptr) {
-            auto toWrite = ret;
+            size_t toWrite = (size_t)ret;
 
             while (!eof && currentSongPlaying && !pendingReset && toWrite > 0) {
-              int written = 0;
+              size_t written = 0;
               {
                 std::scoped_lock dataOutLock(dataOutMutex);
                 // If reset happened during playback, return
@@ -426,6 +427,12 @@ void TrackPlayer::runTask() {
                 size_t offset = (size_t)ret - (size_t)toWrite;
                 written = dataCallback(pcmBuffer.data() + offset, toWrite,
                                        track->identifier);
+              }
+              if (written > toWrite) {
+                CSPOT_LOG(error,
+                          "PCM callback contract violation written=%u requested=%u",
+                          (unsigned)written, (unsigned)toWrite);
+                written = toWrite;
               }
               if (written == 0) {
                 vTaskDelay(1);
@@ -496,7 +503,8 @@ void TrackPlayer::runTask() {
 }
 
 size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
-  if (this->currentTrackStream == nullptr) {
+  if (this->currentTrackStream == nullptr || ptr == nullptr || size == 0 ||
+      nmemb > SIZE_MAX / size) {
     return 0;
   }
 
@@ -548,18 +556,34 @@ int TrackPlayer::_vorbisSeek(int64_t offset, int whence) {
   if (this->currentTrackStream == nullptr) {
     return 0;
   }
+  const size_t streamSize = this->currentTrackStream->getSize();
+  const auto addSignedOffset = [streamSize](size_t base, int64_t delta) {
+    base = std::min(base, streamSize);
+    if (delta >= 0) {
+      const uint64_t increase = (uint64_t)delta;
+      return increase > streamSize - base ? streamSize
+                                          : base + (size_t)increase;
+    }
+    const uint64_t decrease = (uint64_t)(-(delta + 1)) + 1;
+    return decrease > base ? (size_t)0 : base - (size_t)decrease;
+  };
+
   switch (whence) {
     case 0:
-      this->currentTrackStream->seek(offset);  // Spotify header offset
+      this->currentTrackStream->seek(
+          offset > 0 ? std::min((size_t)offset, streamSize) : 0);
       break;
-    case 1:
-      this->currentTrackStream->seek(this->currentTrackStream->getPosition() +
-                                     offset);
+    case 1: {
+      this->currentTrackStream->seek(addSignedOffset(
+          this->currentTrackStream->getPosition(), offset));
       break;
-    case 2:
-      this->currentTrackStream->seek(this->currentTrackStream->getSize() +
-                                     offset);
+    }
+    case 2: {
+      this->currentTrackStream->seek(addSignedOffset(streamSize, offset));
       break;
+    }
+    default:
+      return -1;
   }
 
   return 0;

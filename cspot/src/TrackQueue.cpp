@@ -133,8 +133,12 @@ bool readSpotifyCdnUrlFromBinary(std::string_view body, std::string& cdnUrl) {
 
 namespace TrackDataUtils {
 bool countryListContains(char* countryList, const char* country) {
+  if (countryList == nullptr || country == nullptr || country[0] == '\0' ||
+      country[1] == '\0') {
+    return false;
+  }
   uint16_t countryList_length = strlen(countryList);
-  for (int x = 0; x < countryList_length; x += 2) {
+  for (uint16_t x = 0; x + 1 < countryList_length; x += 2) {
     if (countryList[x] == country[0] && countryList[x + 1] == country[1]) {
       return true;
     }
@@ -144,6 +148,9 @@ bool countryListContains(char* countryList, const char* country) {
 
 bool doRestrictionsApply(Restriction* restrictions, int count,
                          const char* country) {
+  if (restrictions == nullptr || count <= 0) {
+    return false;
+  }
   for (int x = 0; x < count; x++) {
     if (restrictions[x].countries_allowed != nullptr) {
       return !countryListContains(restrictions[x].countries_allowed, country);
@@ -186,16 +193,19 @@ void TrackInfo::loadPbTrack(Track* pbTrack, const std::vector<uint8_t>& gid) {
   // Generate ID based on GID
   trackId = bytesToHexString(gid);
 
-  name = std::string(pbTrack->name);
+  name = pbTrack->name != nullptr ? std::string(pbTrack->name) : std::string();
 
   if (pbTrack->artist_count > 0) {
     // Handle artist data
-    artist = std::string(pbTrack->artist[0].name);
+    artist = pbTrack->artist[0].name != nullptr
+                 ? std::string(pbTrack->artist[0].name)
+                 : std::string();
   }
 
   if (pbTrack->has_album) {
     // Handle album data
-    album = std::string(pbTrack->album.name);
+    album = pbTrack->album.name != nullptr ? std::string(pbTrack->album.name)
+                                           : std::string();
 
     if (pbTrack->album.has_cover_group &&
         pbTrack->album.cover_group.image_count > 0) {
@@ -215,9 +225,10 @@ void TrackInfo::loadPbEpisode(Episode* pbEpisode,
   // Generate ID based on GID
   trackId = bytesToHexString(gid);
 
-  name = std::string(pbEpisode->name);
+  name = pbEpisode->name != nullptr ? std::string(pbEpisode->name)
+                                    : std::string();
 
-  if (pbEpisode->covers->image_count > 0) {
+  if (pbEpisode->covers != nullptr && pbEpisode->covers->image_count > 0) {
     // Handle episode info
     auto imageId = pbArrayToVector(pbEpisode->covers->image[0].file_id);
     imageUrl = "https://i.scdn.co/image/" + bytesToHexString(imageId);
@@ -360,7 +371,7 @@ void QueuedTrack::stepLoadAudioFile(
           bool success, const std::vector<uint8_t>& audioKey) {
         std::scoped_lock lock(trackListMutex);
 
-        if (success) {
+        if (success && audioKey.size() >= 4) {
           CSPOT_LOG(info, "Got audio key");
           this->audioKey =
               std::vector<uint8_t>(audioKey.begin() + 4, audioKey.end());

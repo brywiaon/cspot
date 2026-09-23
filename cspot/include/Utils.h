@@ -83,8 +83,12 @@ std::string bytesToHexString(const std::vector<uint8_t>& bytes);
  */
 template <typename T>
 T extract(const std::vector<unsigned char>& v, int pos) {
-  T value;
-  memcpy(&value, &v[pos], sizeof(T));
+  T value{};
+  if (pos < 0 || (size_t)pos > v.size() ||
+      sizeof(T) > v.size() - (size_t)pos) {
+    return value;
+  }
+  memcpy(&value, v.data() + (size_t)pos, sizeof(T));
   return value;
 }
 

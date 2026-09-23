@@ -3,6 +3,7 @@
 #include <stdio.h>           // for sprintf
 #include <initializer_list>  // for initializer_list
 #include <algorithm>         // for replace
+#include <utility>           // for move
 
 #include "BellLogger.h"                  // for AbstractLogger
 #include "ConstantParameters.h"          // for brandName, cspot, protoc...
@@ -18,11 +19,15 @@
 
 using namespace cspot;
 
-LoginBlob::LoginBlob(std::string name) {
-  char hash[32];
-  sprintf(hash, "%016zu", std::hash<std::string>{}(name));
-  // base is 142137fd329622137a14901634264e6f332e2411
-  this->deviceId = std::string("142137fd329622137a149016") + std::string(hash);
+LoginBlob::LoginBlob(std::string name, std::string deviceId) {
+  if (deviceId.empty()) {
+    char hash[32];
+    sprintf(hash, "%016zu", std::hash<std::string>{}(name));
+    this->deviceId =
+        std::string("142137fd329622137a149016") + std::string(hash);
+  } else {
+    this->deviceId = std::move(deviceId);
+  }
   this->crypto = std::make_unique<Crypto>();
   this->name = name;
 
@@ -254,15 +259,19 @@ std::string LoginBlob::buildZeroconfInfo() {
 #ifdef BELL_ONLY_CJSON
   cJSON* json_obj = cJSON_CreateObject();
   cJSON_AddNumberToObject(json_obj, "status", 101);
+  cJSON_AddNumberToObject(json_obj, "spotifyError", 0);
   cJSON_AddStringToObject(json_obj, "statusString", "OK");
-  cJSON_AddStringToObject(json_obj, "version", cspot::protocolVersion);
+  cJSON_AddStringToObject(json_obj, "responseSource", "Avilion");
+  cJSON_AddStringToObject(json_obj, "version", "2.10.0");
   cJSON_AddStringToObject(json_obj, "libraryVersion", cspot::swVersion);
   cJSON_AddStringToObject(json_obj, "accountReq", "PREMIUM");
-  cJSON_AddStringToObject(json_obj, "brandDisplayName", cspot::brandName);
+  cJSON_AddStringToObject(json_obj, "brandDisplayName", "Avilion");
   cJSON_AddStringToObject(json_obj, "modelDisplayName", name.c_str());
   cJSON_AddStringToObject(json_obj, "voiceSupport", "NO");
   cJSON_AddStringToObject(json_obj, "availability", this->username.c_str());
   cJSON_AddNumberToObject(json_obj, "productID", 0);
+  cJSON_AddStringToObject(json_obj, "clientID",
+                          "26593cf8e7454160bf0c2609b775e687");
   cJSON_AddStringToObject(json_obj, "tokenType", "default");
   cJSON_AddStringToObject(json_obj, "groupStatus", "NONE");
   cJSON_AddStringToObject(json_obj, "resolverVersion", "0");
@@ -272,7 +281,7 @@ std::string LoginBlob::buildZeroconfInfo() {
   cJSON_AddStringToObject(json_obj, "deviceID", deviceId.c_str());
   cJSON_AddStringToObject(json_obj, "remoteName", name.c_str());
   cJSON_AddStringToObject(json_obj, "publicKey", encodedKey.c_str());
-  cJSON_AddStringToObject(json_obj, "deviceType", "deviceType");
+  cJSON_AddStringToObject(json_obj, "deviceType", "SPEAKER");
 
   char* str = cJSON_PrintUnformatted(json_obj);
   cJSON_Delete(json_obj);
@@ -284,15 +293,17 @@ std::string LoginBlob::buildZeroconfInfo() {
   nlohmann::json obj;
   obj["status"] = 101;
   obj["statusString"] = "OK";
-  obj["version"] = cspot::protocolVersion;
+  obj["version"] = "2.10.0";
   obj["spotifyError"] = 0;
+  obj["responseSource"] = "Avilion";
   obj["libraryVersion"] = cspot::swVersion;
   obj["accountReq"] = "PREMIUM";
-  obj["brandDisplayName"] = cspot::brandName;
+  obj["brandDisplayName"] = "Avilion";
   obj["modelDisplayName"] = name;
   obj["voiceSupport"] = "NO";
   obj["availability"] = this->username;
   obj["productID"] = 0;
+  obj["clientID"] = "26593cf8e7454160bf0c2609b775e687";
   obj["tokenType"] = "default";
   obj["groupStatus"] = "NONE";
   obj["resolverVersion"] = "0";

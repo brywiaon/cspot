@@ -196,7 +196,7 @@ void CDNAudioFile::seek(size_t newPos) {
   cancelPrefetch(false);
   this->enableRequestMargin = true;
   this->startupRangeComplete = false;
-  this->position = newPos;
+  this->position = totalFileSize > 0 ? std::min(newPos, totalFileSize) : newPos;
 }
 
 void CDNAudioFile::openStream() {
@@ -246,12 +246,13 @@ void CDNAudioFile::openStream() {
   this->decrypt(header.data(), OPUS_HEADER_SIZE, 0);
 
   // Location must be dividable by 16
-  size_t footerStartLocation =
-      (this->totalFileSize - OPUS_FOOTER_PREFFERED + SPOTIFY_OPUS_HEADER) -
-      (this->totalFileSize - OPUS_FOOTER_PREFFERED + SPOTIFY_OPUS_HEADER) % 16;
+  const size_t actualFileSize = this->totalFileSize + SPOTIFY_OPUS_HEADER;
+  const size_t preferredFooterSize =
+      std::min<size_t>(actualFileSize, OPUS_FOOTER_PREFFERED);
+  size_t footerStartLocation = actualFileSize - preferredFooterSize;
+  footerStartLocation -= footerStartLocation % 16;
 
-  this->footer.resize(this->totalFileSize - footerStartLocation +
-                      SPOTIFY_OPUS_HEADER);
+  this->footer.resize(actualFileSize - footerStartLocation);
   {
     auto response = bell::HTTPClient::get(
         cdnUrl, {bell::HTTPClient::RangeHeader::last(footer.size())});
@@ -477,10 +478,17 @@ void CDNAudioFile::cancelPrefetch(bool waitForTask) {
 
   if (waitForTask && task && task != xTaskGetCurrentTaskHandle()) {
     uint32_t waitStart = cdnNowMs();
-    while (prefetchTask && (cdnNowMs() - waitStart) < 6000) {
+    bool taskStillRunning = true;
+    while (taskStillRunning && (cdnNowMs() - waitStart) < 6000) {
       BELL_SLEEP_MS(10);
+      std::lock_guard<std::mutex> lock(prefetchMutex);
+      taskStillRunning = prefetchTask != nullptr;
     }
-    if (prefetchTask) {
+    {
+      std::lock_guard<std::mutex> lock(prefetchMutex);
+      taskStillRunning = prefetchTask != nullptr;
+    }
+    if (taskStillRunning) {
       CSPOT_LOG(error, "CDN prefetch task did not stop within cleanup window");
     }
   }
@@ -601,7 +609,7 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     return 0;
   }
 
-  if (position + bytes > this->totalFileSize) {
+  if (bytes > this->totalFileSize - position) {
     bytes = this->totalFileSize - position;
   }
 
@@ -624,6 +632,10 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
 
     size_t footerOffset =
         offsetPosition - (actualFileSize - this->footer.size());
+    if (footerOffset >= this->footer.size()) {
+      return 0;
+    }
+    toReadBytes = std::min(toReadBytes, this->footer.size() - footerOffset);
     memcpy(dst, this->footer.data() + footerOffset, toReadBytes);
 
     position += toReadBytes;

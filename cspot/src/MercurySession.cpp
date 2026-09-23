@@ -144,7 +144,13 @@ void MercurySession::unregisterAudioKey(uint32_t sequenceId) {
 void MercurySession::disconnect() {
   CSPOT_LOG(info, "Disconnecting mercury session");
   this->isRunning = false;
-  conn->close();
+  // Reconnect deliberately clears conn before opening another AP. A source
+  // handoff can request disconnect in that window, so never dereference the
+  // transiently empty connection. Keep a snapshot alive through close().
+  auto activeConnection = conn;
+  if (activeConnection) {
+    activeConnection->close();
+  }
   std::scoped_lock lock(this->isRunningMutex);
 }
 
@@ -164,6 +170,10 @@ void MercurySession::handlePacket() {
 
   switch (static_cast<RequestType>(packet.command)) {
     case RequestType::COUNTRY_CODE_RESPONSE: {
+      if (packet.data.size() < 2) {
+        CSPOT_LOG(error, "Rejected truncated country-code packet");
+        break;
+      }
       this->countryCode = std::string();
       this->countryCode.resize(2);
       memcpy(this->countryCode.data(), packet.data.data(), 2);
@@ -172,6 +182,10 @@ void MercurySession::handlePacket() {
     }
     case RequestType::AUDIO_KEY_FAILURE_RESPONSE:
     case RequestType::AUDIO_KEY_SUCCESS_RESPONSE: {
+      if (packet.data.size() < sizeof(uint32_t)) {
+        CSPOT_LOG(error, "Rejected truncated audio-key packet");
+        break;
+      }
       // this->lastRequestTimestamp = -1;
 
       // First four bytes mark the sequence id
@@ -235,23 +249,57 @@ MercurySession::Response MercurySession::decodeResponse(
     const std::vector<uint8_t>& data) {
   Response response = {};
   response.parts = {};
+  response.fail = true;
+
+  constexpr size_t mercuryPrefixSize = 15;
+  if (data.size() < mercuryPrefixSize) {
+    CSPOT_LOG(error, "Rejected truncated mercury response size=%u",
+              (unsigned)data.size());
+    return response;
+  }
 
   auto sequenceLength = ntohs(extract<uint16_t>(data, 0));
+  if (sequenceLength != sizeof(uint64_t)) {
+    CSPOT_LOG(error, "Rejected mercury sequence length=%u",
+              (unsigned)sequenceLength);
+    return response;
+  }
   response.sequenceId = hton64(extract<uint64_t>(data, 2));
 
   auto partsNumber = ntohs(extract<uint16_t>(data, 11));
 
   auto headerSize = ntohs(extract<uint16_t>(data, 13));
+  if ((size_t)headerSize > data.size() - mercuryPrefixSize) {
+    CSPOT_LOG(error, "Rejected mercury header size=%u packet=%u",
+              (unsigned)headerSize, (unsigned)data.size());
+    return response;
+  }
   auto headerBytes =
       std::vector<uint8_t>(data.begin() + 15, data.begin() + 15 + headerSize);
 
   auto pos = 15 + headerSize;
   while (pos < data.size()) {
+    if (data.size() - pos < sizeof(uint16_t)) {
+      CSPOT_LOG(error, "Rejected truncated mercury part header");
+      return response;
+    }
     auto partSize = ntohs(extract<uint16_t>(data, pos));
+    pos += sizeof(uint16_t);
+    if ((size_t)partSize > data.size() - pos) {
+      CSPOT_LOG(error, "Rejected mercury part size=%u remaining=%u",
+                (unsigned)partSize, (unsigned)(data.size() - pos));
+      return response;
+    }
 
     response.parts.push_back(std::vector<uint8_t>(
-        data.begin() + pos + 2, data.begin() + pos + 2 + partSize));
-    pos += 2 + partSize;
+        data.begin() + pos, data.begin() + pos + partSize));
+    pos += partSize;
+  }
+
+  if (partsNumber != response.parts.size() + 1) {
+    CSPOT_LOG(error, "Rejected mercury part count declared=%u actual=%u",
+              (unsigned)partsNumber, (unsigned)(response.parts.size() + 1));
+    return response;
   }
 
   pbDecode(response.mercuryHeader, Header_fields, headerBytes);

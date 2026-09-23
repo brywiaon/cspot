@@ -1,12 +1,18 @@
 idf_component_register(
-    SRCS "idf_component_stub.cpp"
+    SRCS
+        "idf_component_stub.cpp"
+        "cspot/bell/main/audio-sinks/esp/es8311.c"
     INCLUDE_DIRS
         "cspot/include"
         "cspot/bell/main/io/include"
         "cspot/bell/main/utilities/include"
         "cspot/bell/main/audio-sinks/include"
+        "cspot/bell/main/audio-sinks/include/esp"
         "cspot/bell/main/audio-codec/include"
         "cspot/bell/main/audio-dsp/include"
+    REQUIRES
+        esp_driver_i2c
+        esp_driver_gpio
 )
 
 set(BUILD_SHARED_LIBS OFF)

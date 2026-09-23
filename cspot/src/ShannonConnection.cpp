@@ -40,6 +40,11 @@ void ShannonConnection::sendPacket(uint8_t cmd, std::vector<uint8_t>& data) {
   if (!this->conn || !this->conn->isConnected()) {
     return;
   }
+  if (data.size() > UINT16_MAX) {
+    CSPOT_LOG(error, "Refusing oversized shannon packet size=%u",
+              (unsigned)data.size());
+    return;
+  }
 
   auto rawPacket = this->cipherPacket(cmd, data);
 
@@ -105,6 +110,8 @@ cspot::Packet ShannonConnection::recvPacket() {
 
   if (mac != mac2) {
     CSPOT_LOG(error, "Shannon read: Mac doesn't match");
+    this->conn->close();
+    return {};
   }
 
   // Update the nonce

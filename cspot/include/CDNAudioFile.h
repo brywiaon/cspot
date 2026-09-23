@@ -121,7 +121,7 @@ class CDNAudioFile : public std::enable_shared_from_this<CDNAudioFile> {
   bool prefetchInFlight = false;
   bool prefetchFailed = false;
   bool prefetchEncrypted = false;
-  bool prefetchWasAdopted = false;
+  std::atomic<bool> prefetchWasAdopted{false};
 #endif
 
   std::string cdnUrl;
