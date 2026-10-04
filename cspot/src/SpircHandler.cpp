@@ -79,8 +79,15 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
       return;
     }
     if (trackQueue->isFinished()) {
-      notifyAudioEnded(durationMs > 0 ? durationMs : decodedMs);
-      sendEvent(EventType::DEPLETED);
+      // Spotify may provide only the current queue window even when Autoplay
+      // has a continuation. Ask the SPIRC authority for the next item instead
+      // of publishing a terminal pause at duration/duration. The incoming
+      // LOAD/REPLACE frame repopulates TrackQueue and wakes TrackPlayer.
+      playbackState->updatePositionMs(durationMs > 0 ? durationMs : decodedMs);
+      playbackState->setPlaybackState(PlaybackState::State::Playing);
+      CSPOT_LOG(info,
+                "EOF queue window exhausted; requesting Spotify continuation");
+      sendCmd(MessageType_kMessageTypeNext);
       return;
     }
     CSPOT_LOG(info,
@@ -426,6 +433,11 @@ void SpircHandler::setPositionProvider(PositionProvider provider) {
 
 void SpircHandler::setPause(bool isPaused) {
   std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
+  if (playbackState->isPaused() == isPaused) {
+    CSPOT_LOG(debug, "Ignored duplicate %s transition",
+              isPaused ? "pause" : "play");
+    return;
+  }
   // The bridge tracks PCM that has actually reached the speaker. Anchor SPIRC
   // to that audible position before publishing a pause/resume transition.
   if (positionProvider && playbackState->isActive()) {
@@ -437,10 +449,10 @@ void SpircHandler::setPause(bool isPaused) {
   } else {
     CSPOT_LOG(debug, "External play command");
 
-    // A source handoff fully stops the decoder so it cannot contend with
-    // AirPlay/API after cspot releases ownership. Resume the existing queue
-    // before publishing the playing state.
-    this->trackPlayer->start();
+    // Ordinary pause preserves the decoder and PCM reservoir. Only restart a
+    // decoder that source handoff explicitly stopped; calling start on every
+    // resume used to emit a second playback-start edge on some handoffs.
+    if (!this->trackPlayer->running()) this->trackPlayer->start();
 
     playbackState->setPlaybackState(PlaybackState::State::Playing);
   }

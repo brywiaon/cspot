@@ -64,6 +64,9 @@ class PlaybackState {
      * @return false player is inactive
      */
   bool isActive();
+  bool isPaused() const {
+    return innerFrame.state.status != PlayStatus_kPlayStatusPlay;
+  }
 
   /**
      * @brief Updates local track position.

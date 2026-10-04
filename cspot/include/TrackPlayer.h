@@ -61,6 +61,7 @@ class TrackPlayer : bell::Task {
 
   void stop();
   void start();
+  bool running() const { return isRunning.load(std::memory_order_acquire); }
 
  private:
   std::shared_ptr<cspot::Context> ctx;
