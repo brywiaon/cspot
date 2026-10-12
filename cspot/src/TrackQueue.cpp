@@ -11,6 +11,7 @@
 #include "AccessKeyFetcher.h"
 #include "BellTask.h"
 #include "CDNAudioFile.h"
+#include "CheckedPBDecode.h"
 #include "CSpotContext.h"
 #include "HTTPClient.h"
 #include "Logger.h"
@@ -30,6 +31,8 @@
 using namespace cspot;
 
 namespace {
+std::atomic<uint64_t> s_nextTrackInstanceId{1};
+
 #ifdef ESP_PLATFORM
 uint32_t cspotNowMs() {
   return (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -190,6 +193,7 @@ bool canPlayTrack(Track& trackInfo, int altIndex, const char* country) {
 }  // namespace TrackDataUtils
 
 void TrackInfo::loadPbTrack(Track* pbTrack, const std::vector<uint8_t>& gid) {
+  if (!pbTrack) return;
   // Generate ID based on GID
   trackId = bytesToHexString(gid);
 
@@ -222,6 +226,7 @@ void TrackInfo::loadPbTrack(Track* pbTrack, const std::vector<uint8_t>& gid) {
 
 void TrackInfo::loadPbEpisode(Episode* pbEpisode,
                               const std::vector<uint8_t>& gid) {
+  if (!pbEpisode) return;
   // Generate ID based on GID
   trackId = bytesToHexString(gid);
 
@@ -242,7 +247,9 @@ void TrackInfo::loadPbEpisode(Episode* pbEpisode,
 QueuedTrack::QueuedTrack(TrackReference& ref,
                          std::shared_ptr<cspot::Context> ctx,
                          uint32_t requestedPosition)
-    : requestedPosition(requestedPosition), ctx(ctx) {
+    : instanceId(s_nextTrackInstanceId.fetch_add(1, std::memory_order_relaxed)),
+      requestedPosition(requestedPosition),
+      ctx(ctx) {
   this->ref = ref;
 
   loadedSemaphore = std::make_shared<bell::WrappedSemaphore>();
@@ -260,6 +267,9 @@ QueuedTrack::~QueuedTrack() {
   if (pendingAudioKeyRequest != 0) {
     ctx->session->unregisterAudioKey(pendingAudioKeyRequest);
   }
+
+  pb_release(Track_fields, &metadataTrack);
+  pb_release(Episode_fields, &metadataEpisode);
 }
 
 std::shared_ptr<cspot::CDNAudioFile> QueuedTrack::getAudioFile() {
@@ -278,7 +288,13 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
   const char* countryCode = ctx->config.countryCode.c_str();
 
   if (ref.type == TrackReference::Type::TRACK) {
-    CSPOT_LOG(info, "Track name: %s", pbTrack->name);
+    if (!pbTrack) {
+      failureReason = "missing track metadata";
+      state = State::FAILED;
+      loadedSemaphore->give();
+      return;
+    }
+    CSPOT_LOG(info, "Track name: %s", pbTrack->name ? pbTrack->name : "");
     CSPOT_LOG(info, "Track duration: %d", pbTrack->duration);
 
     CSPOT_LOG(debug, "trackInfo.restriction.size() = %d",
@@ -310,8 +326,15 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
       trackInfo.loadPbTrack(pbTrack, trackId);
     }
   } else {
+    if (!pbEpisode) {
+      failureReason = "missing episode metadata";
+      state = State::FAILED;
+      loadedSemaphore->give();
+      return;
+    }
     // Handle episodes
-    CSPOT_LOG(info, "Episode name: %s", pbEpisode->name);
+    CSPOT_LOG(info, "Episode name: %s",
+              pbEpisode->name ? pbEpisode->name : "");
     CSPOT_LOG(info, "Episode duration: %d", pbEpisode->duration);
 
     CSPOT_LOG(debug, "episodeInfo.restriction.size() = %d",
@@ -347,7 +370,9 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
 
   // No viable files found for playback
   if (fileId.size() == 0) {
-    CSPOT_LOG(info, "File not available for playback");
+    failureReason = "no compatible audio file";
+    CSPOT_LOG(error, "File not available for playback uri=%s format=%d files=%d",
+              ref.uri.c_str(), (int)ctx->config.audioFormat, filesCount);
 
     // no alternatives for song
     state = State::FAILED;
@@ -365,22 +390,26 @@ void QueuedTrack::stepLoadAudioFile(
     std::mutex& trackListMutex,
     std::shared_ptr<bell::WrappedSemaphore> updateSemaphore) {
   // Request audio key
+  std::weak_ptr<QueuedTrack> weakSelf = weak_from_this();
   this->pendingAudioKeyRequest = ctx->session->requestAudioKey(
       trackId, fileId,
-      [this, &trackListMutex, updateSemaphore](
+      [weakSelf, &trackListMutex, updateSemaphore](
           bool success, const std::vector<uint8_t>& audioKey) {
+        auto self = weakSelf.lock();
+        if (!self) return;
         std::scoped_lock lock(trackListMutex);
 
         if (success && audioKey.size() >= 4) {
           CSPOT_LOG(info, "Got audio key");
-          this->audioKey =
+          self->audioKey =
               std::vector<uint8_t>(audioKey.begin() + 4, audioKey.end());
 
-          state = State::CDN_REQUIRED;
+          self->state = State::CDN_REQUIRED;
         } else {
           CSPOT_LOG(error, "Failed to get audio key");
-          state = State::FAILED;
-          loadedSemaphore->give();
+          self->failureReason = "audio key request failed";
+          self->state = State::FAILED;
+          self->loadedSemaphore->give();
         }
         updateSemaphore->give();
       });
@@ -434,6 +463,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
                 contentType.c_str(), contentEncoding.c_str(),
                 transferEncoding.c_str(), spotifyBodyPreview(result).c_str());
       state = State::FAILED;
+      failureReason = "invalid CDN URL response";
       loadedSemaphore->give();
       return;
     }
@@ -444,6 +474,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     loadedSemaphore->give();
   } catch (...) {
     CSPOT_LOG(error, "Cannot fetch CDN URL");
+    failureReason = "CDN URL request failed";
     state = State::FAILED;
     loadedSemaphore->give();
   }
@@ -451,13 +482,14 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
 
 void QueuedTrack::expire() {
   if (state != State::QUEUED) {
+    failureReason = "queue entry expired";
     state = State::FAILED;
     loadedSemaphore->give();
   }
 }
 
 void QueuedTrack::stepLoadMetadata(
-    Track* pbTrack, Episode* pbEpisode, std::mutex& trackListMutex,
+    std::mutex& trackListMutex,
     std::shared_ptr<bell::WrappedSemaphore> updateSemaphore) {
 
   // Prepare request ID
@@ -466,29 +498,48 @@ void QueuedTrack::stepLoadMetadata(
       ref.type == TrackReference::Type::TRACK ? "track" : "episode",
       bytesToHexString(ref.gid).c_str());
 
-  auto responseHandler = [this, pbTrack, pbEpisode, &trackListMutex,
+  std::weak_ptr<QueuedTrack> weakSelf = weak_from_this();
+  auto responseHandler = [weakSelf, &trackListMutex,
                           updateSemaphore](MercurySession::Response& res) {
+    auto self = weakSelf.lock();
+    if (!self) return;
     std::scoped_lock lock(trackListMutex);
 
     if (res.parts.size() == 0) {
       // Invalid metadata, cannot proceed
-      state = State::FAILED;
+      self->failureReason = "empty metadata response";
+      self->state = State::FAILED;
       updateSemaphore->give();
-      loadedSemaphore->give();
+      self->loadedSemaphore->give();
       return;
     }
 
     // Parse the metadata
-    if (ref.type == TrackReference::Type::TRACK) {
-      pb_release(Track_fields, pbTrack);
-      pbDecode(*pbTrack, Track_fields, res.parts[0]);
+    if (self->ref.type == TrackReference::Type::TRACK) {
+      pb_release(Track_fields, &self->metadataTrack);
+      self->metadataTrack = Track_init_zero;
+      if (!pbDecodeChecked(self->metadataTrack, Track_fields, res.parts[0])) {
+        self->failureReason = "track metadata decode failed";
+        self->state = State::FAILED;
+        updateSemaphore->give();
+        self->loadedSemaphore->give();
+        return;
+      }
     } else {
-      pb_release(Episode_fields, pbEpisode);
-      pbDecode(*pbEpisode, Episode_fields, res.parts[0]);
+      pb_release(Episode_fields, &self->metadataEpisode);
+      self->metadataEpisode = Episode_init_zero;
+      if (!pbDecodeChecked(self->metadataEpisode, Episode_fields,
+                           res.parts[0])) {
+        self->failureReason = "episode metadata decode failed";
+        self->state = State::FAILED;
+        updateSemaphore->give();
+        self->loadedSemaphore->give();
+        return;
+      }
     }
 
     // Parse received metadata
-    stepParseMetadata(pbTrack, pbEpisode);
+    self->stepParseMetadata(&self->metadataTrack, &self->metadataEpisode);
 
     updateSemaphore->give();
   };
@@ -513,9 +564,6 @@ TrackQueue::TrackQueue(std::shared_ptr<cspot::Context> ctx,
   playbackState->innerFrame.state.track.funcs.encode =
       &TrackReference::pbEncodeTrackList;
   playbackState->innerFrame.state.track.arg = &currentTracks;
-  pbTrack = Track_init_zero;
-  pbEpisode = Episode_init_zero;
-
   // Start the task
   startTask();
 };
@@ -525,8 +573,6 @@ TrackQueue::~TrackQueue() {
 
   std::scoped_lock lock(tracksMutex);
 
-  pb_release(Track_fields, &pbTrack);
-  pb_release(Episode_fields, &pbEpisode);
 }
 
 TrackInfo TrackQueue::getTrackInfo(std::string_view identifier) {
@@ -636,8 +682,7 @@ void TrackQueue::processTrack(std::shared_ptr<QueuedTrack> track) {
 
   switch (track->state) {
     case QueuedTrack::State::QUEUED:
-      track->stepLoadMetadata(&pbTrack, &pbEpisode, tracksMutex,
-                              processSemaphore);
+      track->stepLoadMetadata(tracksMutex, processSemaphore);
       break;
     case QueuedTrack::State::KEY_REQUIRED:
       track->stepLoadAudioFile(tracksMutex, processSemaphore);
@@ -758,6 +803,11 @@ bool TrackQueue::hasTracks() {
   std::scoped_lock lock(tracksMutex);
 
   return currentTracks.size() > 0;
+}
+
+uint64_t TrackQueue::currentTrackInstanceId() {
+  std::scoped_lock lock(tracksMutex);
+  return preloadedTracks.empty() ? 0 : preloadedTracks.front()->instanceId;
 }
 
 bool TrackQueue::isFinished() {

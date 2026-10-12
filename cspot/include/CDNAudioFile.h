@@ -74,9 +74,11 @@ class CDNAudioFile : public std::enable_shared_from_this<CDNAudioFile> {
   const int OPUS_FOOTER_PREFFERED = 1024 * 12;  // 12K should be safe
   const int SEEK_MARGIN_SIZE = 1024 * 4;
 
-  // Half-megabyte ranges keep each TLS read bounded while still amortizing
-  // request setup. Two buffers maintain a continuous download/decode pipeline.
-  const int HTTP_START_BUFFER_SIZE = 512 * 1024;
+  // Vorbis startup and random seek probes need only a small window. Fetching a
+  // full half-megabyte for each probe made Connect handoff spend several
+  // seconds downloading bytes that were immediately discarded. Sustained
+  // playback still uses 512 KiB ranges and the parallel prefetch pipeline.
+  const int HTTP_START_BUFFER_SIZE = 128 * 1024;
   const int HTTP_BUFFER_SIZE = 512 * 1024;
   const int HTTP_PREFETCH_BUFFER_SIZE = HTTP_BUFFER_SIZE;
   const int HTTP_PREFETCH_WAIT_MS = 8000;

@@ -9,6 +9,7 @@
 #include <utility>      // for swap
 
 #include "BellLogger.h"          // for AbstractLogger
+#include "CheckedPBDecode.h"
 #include "CSpotContext.h"        // for Context::ConfigState, Context (ptr o...
 #include "ConstantParameters.h"  // for protocolVersion, swVersion
 #include "Logger.h"              // for CSPOT_LOG
@@ -159,8 +160,15 @@ bool PlaybackState::decodeRemoteFrame(std::vector<uint8_t>& data) {
 
   remoteTracks.clear();
 
-  pbDecode(remoteFrame, Frame_fields, data);
-
+  if (!pbDecodeChecked(remoteFrame, Frame_fields, data)) {
+    pb_release(Frame_fields, &remoteFrame);
+    remoteFrame = {};
+    remoteFrame.state.track.funcs.decode = &TrackReference::pbDecodeTrackList;
+    remoteFrame.state.track.arg = &remoteTracks;
+    remoteTracks.clear();
+    CSPOT_LOG(error, "Rejected malformed Spotify remote frame");
+    return false;
+  }
   return true;
 }
 

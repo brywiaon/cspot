@@ -19,6 +19,7 @@ struct Context;
 class SpircHandler {
  public:
   SpircHandler(std::shared_ptr<cspot::Context> ctx);
+  ~SpircHandler();
 
   enum class EventType {
     PLAY_PAUSE,
@@ -33,7 +34,13 @@ class SpircHandler {
     PLAYBACK_START
   };
 
-  typedef std::variant<TrackInfo, int, bool> EventData;
+  struct PlaybackStartData {
+    int positionMs = 0;
+    uint64_t trackInstanceId = 0;
+    std::string trackUri;
+  };
+
+  typedef std::variant<TrackInfo, PlaybackStartData, int, bool> EventData;
 
   struct Event {
     EventType eventType;
@@ -59,13 +66,21 @@ class SpircHandler {
   void notifyAudioEnded(uint32_t finalPositionMs);
   void updatePositionMs(uint32_t position);
   void setRemoteVolume(int volume);
-  void loadTrackFromURI(const std::string& uri);
+  uint64_t loadTrackFromURI(const std::string& uri);
   std::shared_ptr<cspot::TrackQueue> getTrackQueue() { return trackQueue; }
 
   void disconnect();
 
  private:
+  struct CallbackGate {
+    explicit CallbackGate(SpircHandler* owner) : owner(owner) {}
+
+    std::mutex mutex;
+    SpircHandler* owner;
+  };
+
   std::shared_ptr<cspot::Context> ctx;
+  std::shared_ptr<CallbackGate> callbackGate;
   std::shared_ptr<cspot::TrackPlayer> trackPlayer;
   std::shared_ptr<cspot::TrackQueue> trackQueue;
 
@@ -88,6 +103,9 @@ class SpircHandler {
   void noteVolumeActivity();
   bool suppressPlaybackStartAfterEofReject(const std::shared_ptr<QueuedTrack>& track);
   std::string currentPlayingTrackUri() const;
+  void handleTrackEof(uint32_t decodedMs, uint32_t durationMs,
+                      size_t streamPosition, size_t streamSize);
+  void handleTrackLoaded(std::shared_ptr<QueuedTrack> track, bool paused);
   void handleFrame(std::vector<uint8_t>& data);
   void notify();
 };

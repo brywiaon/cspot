@@ -34,6 +34,7 @@ Session::Session() {
 Session::~Session() {}
 
 void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
+  std::lock_guard<std::recursive_mutex> transportLock(transportMutex);
   this->shanConn = nullptr;
   if (!connection || !connection->isConnected()) {
     CSPOT_LOG(error, "Spotify AP connection unavailable");
@@ -116,7 +117,7 @@ void Session::connectWithRandomAp() {
     }
 
     this->connect(std::move(conn));
-    if (this->shanConn) {
+    if (shannonSnapshot()) {
       lastSuccessfulAp = apAddr;
       return;
     }
@@ -128,7 +129,8 @@ void Session::connectWithRandomAp() {
 std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
   // save auth blob for reconnection purposes
   authBlob = blob;
-  if (!this->shanConn || !blob) {
+  auto activeShannon = shannonSnapshot();
+  if (!activeShannon || !blob) {
     CSPOT_LOG(error, "Spotify authentication skipped; no AP session");
     return {};
   }
@@ -138,9 +140,9 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
                                             deviceId, blob->username);
 
   // Send login request
-  this->shanConn->sendPacket(LOGIN_REQUEST_COMMAND, data);
+  activeShannon->sendPacket(LOGIN_REQUEST_COMMAND, data);
 
-  auto packet = this->shanConn->recvPacket();
+  auto packet = activeShannon->recvPacket();
   switch (packet.command) {
     case AUTH_SUCCESSFUL_COMMAND: {
       APWelcome welcome = APWelcome_init_zero;
@@ -163,7 +165,22 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
 }
 
 void Session::close() {
-  if (this->conn) {
-    this->conn->close();
-  }
+  auto activeConnection = connectionSnapshot();
+  if (activeConnection) activeConnection->close();
+}
+
+std::shared_ptr<cspot::PlainConnection> Session::connectionSnapshot() const {
+  std::lock_guard<std::recursive_mutex> transportLock(transportMutex);
+  return conn;
+}
+
+std::shared_ptr<cspot::ShannonConnection> Session::shannonSnapshot() const {
+  std::lock_guard<std::recursive_mutex> transportLock(transportMutex);
+  return shanConn;
+}
+
+void Session::clearTransport() {
+  std::lock_guard<std::recursive_mutex> transportLock(transportMutex);
+  conn.reset();
+  shanConn.reset();
 }

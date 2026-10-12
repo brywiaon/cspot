@@ -21,11 +21,11 @@
 
 #ifdef BELL_VORBIS_FLOAT
 #define VORBIS_SEEK(file, position) \
-  (ov_time_seek(file, (double)position / 1000))
+  (ov_time_seek_page(file, (double)position / 1000))
 #define VORBIS_READ(file, buffer, bufferSize, section) \
   (ov_read(file, buffer, bufferSize, 0, 2, 1, section))
 #else
-#define VORBIS_SEEK(file, position) (ov_time_seek(file, position))
+#define VORBIS_SEEK(file, position) (ov_time_seek_page(file, position))
 #define VORBIS_READ(file, buffer, bufferSize, section) \
   (ov_read(file, buffer, bufferSize, section))
 #endif
@@ -33,6 +33,8 @@
 static constexpr uint32_t INITIAL_HANDOFF_SEEK_BYPASS_MS = 0;
 static constexpr uint32_t PCM_RATE_LOG_INTERVAL_MS = 3000;
 static constexpr size_t PCM_PRODUCER_YIELD_BYTES = 64 * 1024;
+static constexpr TickType_t PCM_PRODUCER_COOPERATIVE_DELAY_TICKS =
+    pdMS_TO_TICKS(4);
 
 namespace cspot {
 struct Context;
@@ -90,10 +92,10 @@ uint32_t trackPlayerNowMs() {
 TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          std::shared_ptr<cspot::TrackQueue> trackQueue,
                          EOFCallback eof, TrackLoadedCallback trackLoaded)
-    // Decode/network production belongs on Core 0. Core 1 is reserved for the
-    // bridge's high-priority PCM/I2S consumer so Vorbis and PSRAM bursts can
-    // never delay the speaker clock.
-    : bell::Task("cspot_player", 64 * 1024, 11, 0) {
+    // Vorbis decoding is throughput work, not a realtime owner. Keeping it
+    // scheduler-balanced and below the PCM consumer prevents a long Spotify
+    // seek from starving either core's idle/watchdog service.
+    : bell::Task("cspot_player", 64 * 1024, 16, tskNO_AFFINITY) {
   this->ctx = ctx;
   this->eofCallback = eof;
   this->trackLoaded = trackLoaded;
@@ -151,6 +153,36 @@ void TrackPlayer::resetState(bool paused) {
   CSPOT_LOG(info, "Resetting state");
 }
 
+bool TrackPlayer::beginQueueReplacement(bool paused, uint32_t timeoutMs) {
+  // Queue publication and decoder teardown are one transaction. Merely
+  // setting pendingReset is not sufficient: the decoder may otherwise consume
+  // the old queue before its publisher installs the replacement.
+  queueReplacementInProgress.store(true, std::memory_order_release);
+  decoderQuiesced.store(false, std::memory_order_release);
+  resetState(paused);
+  trackQueue->playableSemaphore->give();
+
+  const uint32_t startedAt = cspotPlayerNowMs();
+  while (isRunning.load(std::memory_order_acquire) &&
+         !decoderQuiesced.load(std::memory_order_acquire)) {
+    if (cspotPlayerNowMs() - startedAt >= timeoutMs) {
+      CSPOT_LOG(error,
+                "Decoder did not quiesce for queue replacement within %u ms",
+                (unsigned)timeoutMs);
+      queueReplacementInProgress.store(false, std::memory_order_release);
+      trackQueue->playableSemaphore->give();
+      return false;
+    }
+    BELL_SLEEP_MS(2);
+  }
+  return true;
+}
+
+void TrackPlayer::endQueueReplacement() {
+  queueReplacementInProgress.store(false, std::memory_order_release);
+  trackQueue->playableSemaphore->give();
+}
+
 void TrackPlayer::seekMs(size_t ms) {
   CSPOT_LOG(info, "Seek requested pos=%u", (unsigned)ms);
   this->pendingSeekPositionMs.store(ms, std::memory_order_release);
@@ -174,6 +206,14 @@ void TrackPlayer::runTask() {
     bool retryCurrentTrack = false;
     bool retryCurrentTrackFast = false;
 
+    if (queueReplacementInProgress.load(std::memory_order_acquire)) {
+      currentSongPlaying.store(false, std::memory_order_release);
+      track = nullptr;
+      decoderQuiesced.store(true, std::memory_order_release);
+      BELL_SLEEP_MS(2);
+      continue;
+    }
+
     // Ensure we even have any tracks to play
     if (!this->trackQueue->hasTracks() ||
         (!pendingReset && endOfQueueReached && trackQueue->isFinished())) {
@@ -186,6 +226,7 @@ void TrackPlayer::runTask() {
       track = nullptr;
       pendingReset = false;
       inFuture = false;
+      decoderQuiesced.store(true, std::memory_order_release);
     }
 
     endOfQueueReached = false;
@@ -195,6 +236,12 @@ void TrackPlayer::runTask() {
     }
 
     newTrack = trackQueue->consumeTrack(track, trackOffset);
+
+    if (queueReplacementInProgress.load(std::memory_order_acquire)) {
+      track = nullptr;
+      decoderQuiesced.store(true, std::memory_order_release);
+      continue;
+    }
 
     if (newTrack == nullptr) {
       if (trackOffset == -1) {
@@ -212,12 +259,26 @@ void TrackPlayer::runTask() {
 
     if (track->state != QueuedTrack::State::READY) {
       auto waitStartMs = cspotPlayerNowMs();
-      track->loadedSemaphore->twait(12000);
+      while (track->state != QueuedTrack::State::READY &&
+             !pendingReset.load(std::memory_order_acquire) &&
+             !queueReplacementInProgress.load(std::memory_order_acquire) &&
+             cspotPlayerNowMs() - waitStartMs < 12000) {
+        track->loadedSemaphore->twait(50);
+      }
+
+      if (pendingReset.load(std::memory_order_acquire) ||
+          queueReplacementInProgress.load(std::memory_order_acquire)) {
+        track = nullptr;
+        continue;
+      }
 
       if (track->state != QueuedTrack::State::READY) {
         CSPOT_LOG(error,
-                  "Track failed to load; holding current queue position state=%d wait=%u total=%u",
-                  (int)track->state, (unsigned)(cspotPlayerNowMs() - waitStartMs),
+                  "Track failed to load; holding current queue position state=%d reason=%s uri=%s wait=%u total=%u",
+                  (int)track->state,
+                  track->failureReason.empty() ? "unspecified" : track->failureReason.c_str(),
+                  track->ref.uri.c_str(),
+                  (unsigned)(cspotPlayerNowMs() - waitStartMs),
                   (unsigned)(track->loadStartMs ? cspotPlayerNowMs() - track->loadStartMs : 0));
         track = nullptr;
         BELL_SLEEP_MS(100);
@@ -226,6 +287,7 @@ void TrackPlayer::runTask() {
     }
 
     currentSongPlaying = true;
+    decoderQuiesced.store(false, std::memory_order_release);
     uint32_t decodedPlaybackMs = track->requestedPosition;
     size_t finalStreamPosition = 0;
     size_t finalStreamSize = 0;
@@ -240,6 +302,7 @@ void TrackPlayer::runTask() {
       for (int openAttempt = 0; openAttempt < 3; openAttempt++) {
         currentTrackStream->openStream();
         if (currentTrackStream->getSize() > 0 || pendingReset ||
+            queueReplacementInProgress.load(std::memory_order_acquire) ||
             !currentSongPlaying) {
           break;
         }
@@ -257,7 +320,9 @@ void TrackPlayer::runTask() {
         continue;
       }
 
-      if (pendingReset || !currentSongPlaying) {
+      if (pendingReset ||
+          queueReplacementInProgress.load(std::memory_order_acquire) ||
+          !currentSongPlaying) {
         currentTrackStream = nullptr;
         track->loading = false;
         continue;
@@ -309,7 +374,8 @@ void TrackPlayer::runTask() {
       track->loading = true;
       decodedPlaybackMs = track->requestedPosition;
 
-      while (!eof && currentSongPlaying) {
+      while (!eof && currentSongPlaying &&
+             !queueReplacementInProgress.load(std::memory_order_acquire)) {
         // Execute seek if needed
         if (pendingSeekRequested.exchange(false, std::memory_order_acq_rel)) {
           uint32_t seekPosition =
@@ -442,10 +508,11 @@ void TrackPlayer::runTask() {
           }
           if (decodedBytesSinceYield >= PCM_PRODUCER_YIELD_BYTES) {
             decodedBytesSinceYield = 0;
-            // A yield cannot schedule IDLE0 while this task remains the
-            // highest-priority ready task. One tick prevents watchdog and
-            // network starvation without changing decoder or PCM timing.
-            vTaskDelay(1);
+            // A bare yield only selects peers at the same priority. Block for
+            // a bounded interval so the idle/watchdog and hosted networking
+            // tasks are guaranteed an execution window on sustained decode.
+            vTaskDelay(std::max<TickType_t>(1,
+                PCM_PRODUCER_COOPERATIVE_DELAY_TICKS));
           }
         }
 
@@ -480,6 +547,12 @@ void TrackPlayer::runTask() {
       track->loading = false;
     }
 
+    if (queueReplacementInProgress.load(std::memory_order_acquire)) {
+      track = nullptr;
+      decoderQuiesced.store(true, std::memory_order_release);
+      continue;
+    }
+
     if (retryCurrentTrack) {
       track = nullptr;
       BELL_SLEEP_MS(retryCurrentTrackFast ? 10 : 250);
@@ -503,7 +576,12 @@ void TrackPlayer::runTask() {
 }
 
 size_t TrackPlayer::_vorbisRead(void* ptr, size_t size, size_t nmemb) {
-  if (this->currentTrackStream == nullptr || ptr == nullptr || size == 0 ||
+  // libvorbis can continue probing after a queue replacement has retired the
+  // current decoder. Terminate that probe immediately instead of allowing an
+  // obsolete CDN seek/read to delay the newly selected track.
+  if (pendingReset.load(std::memory_order_acquire) ||
+      !currentSongPlaying.load(std::memory_order_acquire) ||
+      this->currentTrackStream == nullptr || ptr == nullptr || size == 0 ||
       nmemb > SIZE_MAX / size) {
     return 0;
   }
@@ -553,8 +631,15 @@ size_t TrackPlayer::_vorbisClose() {
 }
 
 int TrackPlayer::_vorbisSeek(int64_t offset, int whence) {
+  // A reset means the Ogg instance and its stream no longer own playback.
+  // Returning failure makes ov_time_seek_page unwind rather than performing
+  // further range probes against a track that has already been superseded.
+  if (pendingReset.load(std::memory_order_acquire) ||
+      !currentSongPlaying.load(std::memory_order_acquire)) {
+    return -1;
+  }
   if (this->currentTrackStream == nullptr) {
-    return 0;
+    return -1;
   }
   const size_t streamSize = this->currentTrackStream->getSize();
   const auto addSignedOffset = [streamSize](size_t base, int64_t delta) {

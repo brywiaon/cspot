@@ -52,6 +52,8 @@ class TrackPlayer : bell::Task {
   // CDNTrackStream::TrackInfo getCurrentTrackInfo();
   void seekMs(size_t ms);
   void resetState(bool paused = false);
+  bool beginQueueReplacement(bool paused = false, uint32_t timeoutMs = 3000);
+  void endQueueReplacement();
 
   // Vorbis codec callbacks
   size_t _vorbisRead(void* ptr, size_t size, size_t nmemb);
@@ -93,6 +95,8 @@ class TrackPlayer : bell::Task {
 
   std::atomic<bool> isRunning = false;
   std::atomic<bool> pendingReset = false;
+  std::atomic<bool> queueReplacementInProgress = false;
+  std::atomic<bool> decoderQuiesced = true;
   std::atomic<bool> inFuture = false;
   std::atomic<size_t> pendingSeekPositionMs = 0;
   std::atomic<bool> pendingSeekRequested = false;

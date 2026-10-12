@@ -14,12 +14,18 @@ TrackReference::TrackReference() : type(Type::TRACK) {}
 void TrackReference::decodeURI() {
   if (gid.size() == 0) {
     // Episode GID is being fetched via base62 encoded URI
-    auto idString = uri.substr(uri.find_last_of(":") + 1, uri.size());
+    const size_t delimiter = uri.find_last_of(":");
+    if (delimiter == std::string::npos || delimiter + 1 >= uri.size()) return;
+    auto idString = uri.substr(delimiter + 1);
     gid = {0};
 
     std::string_view alphabet(base62Alphabet);
     for (int x = 0; x < idString.size(); x++) {
       size_t d = alphabet.find(idString[x]);
+      if (d == std::string_view::npos) {
+        gid.clear();
+        return;
+      }
       gid = bigNumMultiply(gid, 62);
       gid = bigNumAdd(gid, d);
     }

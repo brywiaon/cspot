@@ -2,6 +2,7 @@
 
 #include <stdint.h>  // for uint8_t
 #include <memory>    // for shared_ptr, unique_ptr
+#include <mutex>     // for recursive_mutex
 #include <string>    // for string
 #include <vector>    // for vector
 
@@ -22,8 +23,13 @@ class Session {
   std::unique_ptr<cspot::AuthChallenges> challenges;
   std::shared_ptr<cspot::PlainConnection> conn;
   std::shared_ptr<LoginBlob> authBlob;
+  mutable std::recursive_mutex transportMutex;
 
   std::string deviceId = "142137fd329622137a14901634264e6f332e2411";
+
+  std::shared_ptr<cspot::PlainConnection> connectionSnapshot() const;
+  std::shared_ptr<cspot::ShannonConnection> shannonSnapshot() const;
+  void clearTransport();
 
  public:
   Session();

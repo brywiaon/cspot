@@ -30,7 +30,7 @@ struct TrackInfo {
   void loadPbEpisode(Episode* pbEpisode, const std::vector<uint8_t>& gid);
 };
 
-class QueuedTrack {
+class QueuedTrack : public std::enable_shared_from_this<QueuedTrack> {
  public:
   QueuedTrack(TrackReference& ref, std::shared_ptr<cspot::Context> ctx,
               uint32_t requestedPosition = 0);
@@ -48,6 +48,7 @@ class QueuedTrack {
 
   std::shared_ptr<bell::WrappedSemaphore> loadedSemaphore;
 
+  const uint64_t instanceId;
   State state = State::QUEUED;  // Current state of the track
   TrackReference ref;           // Holds GID, URI and Context
   TrackInfo trackInfo;  // Full track information fetched from spotify, name etc
@@ -55,6 +56,7 @@ class QueuedTrack {
   uint32_t requestedPosition;
   uint32_t loadStartMs = 0;
   std::string identifier;
+  std::string failureReason;
   bool loading = false;
 
   // Will return nullptr if the track is not ready
@@ -62,7 +64,7 @@ class QueuedTrack {
 
   // --- Steps ---
   void stepLoadMetadata(
-      Track* pbTrack, Episode* pbEpisode, std::mutex& trackListMutex,
+      std::mutex& trackListMutex,
       std::shared_ptr<bell::WrappedSemaphore> updateSemaphore);
 
   void stepParseMetadata(Track* pbTrack, Episode* pbEpisode);
@@ -83,6 +85,10 @@ class QueuedTrack {
 
   std::vector<uint8_t> trackId, fileId, audioKey;
   std::string cdnUrl;
+  // Mercury replies are asynchronous. Decode into storage owned by this
+  // queue entry so a retired request cannot overwrite its successor.
+  Track metadataTrack = Track_init_zero;
+  Episode metadataEpisode = Episode_init_zero;
 };
 
 class TrackQueue : public bell::Task {
@@ -104,6 +110,7 @@ class TrackQueue : public bell::Task {
   bool isCurrentTrack(const TrackReference& ref);
   bool skipTrack(SkipDirection dir, bool expectNotify = true);
   bool updateTracks(uint32_t requestedPosition = 0, bool initial = false);
+  uint64_t currentTrackInstanceId();
   TrackInfo getTrackInfo(std::string_view identifier);
   std::shared_ptr<QueuedTrack> consumeTrack(
       std::shared_ptr<QueuedTrack> prevSong, int& offset);
@@ -119,10 +126,6 @@ class TrackQueue : public bell::Task {
   std::deque<std::shared_ptr<QueuedTrack>> preloadedTracks;
   std::vector<TrackReference> currentTracks;
   std::mutex tracksMutex, runningMutex;
-
-  // PB data
-  Track pbTrack;
-  Episode pbEpisode;
 
   std::string accessKey;
 

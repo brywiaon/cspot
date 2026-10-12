@@ -21,13 +21,58 @@
 
 using namespace cspot;
 
-SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
-  this->playbackState = std::make_shared<PlaybackState>(ctx);
-  this->trackQueue = std::make_shared<cspot::TrackQueue>(ctx, playbackState);
+SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx)
+    : ctx(std::move(ctx)), callbackGate(std::make_shared<CallbackGate>(this)) {
+  this->playbackState = std::make_shared<PlaybackState>(this->ctx);
+  this->trackQueue =
+      std::make_shared<cspot::TrackQueue>(this->ctx, playbackState);
 
-  auto EOFCallback = [this](uint32_t decodedMs, uint32_t durationMs,
+  auto gate = callbackGate;
+  auto EOFCallback = [gate](uint32_t decodedMs, uint32_t durationMs,
                             size_t streamPosition, size_t streamSize) {
-    std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
+    std::lock_guard<std::mutex> callbackLock(gate->mutex);
+    if (gate->owner) {
+      gate->owner->handleTrackEof(decodedMs, durationMs, streamPosition,
+                                  streamSize);
+    }
+  };
+
+  auto trackLoadedCallback =
+      [gate](std::shared_ptr<QueuedTrack> track, bool paused = false) {
+        std::lock_guard<std::mutex> callbackLock(gate->mutex);
+        if (gate->owner) {
+          gate->owner->handleTrackLoaded(std::move(track), paused);
+        }
+      };
+
+  this->trackPlayer = std::make_shared<TrackPlayer>(
+      this->ctx, trackQueue, EOFCallback, trackLoadedCallback);
+
+  // The session can reconnect after the owner begins teardown. Route the
+  // callback through the same gate as decoder callbacks so a late packet can
+  // never dereference a retired SpircHandler.
+  this->ctx->session->setConnectedHandler([gate]() {
+    std::lock_guard<std::mutex> callbackLock(gate->mutex);
+    if (gate->owner) gate->owner->subscribeToMercury();
+  });
+}
+
+SpircHandler::~SpircHandler() {
+  // Revoke future entry first, then wait for any callback already inside the
+  // gate. TrackQueue and TrackPlayer are stopped only after no callback can
+  // reach this object again.
+  if (ctx && ctx->session) ctx->session->setConnectedHandler(nullptr);
+  {
+    std::lock_guard<std::mutex> callbackLock(callbackGate->mutex);
+    callbackGate->owner = nullptr;
+  }
+  if (trackQueue) trackQueue->stopTask();
+  if (trackPlayer) trackPlayer->stop();
+}
+
+void SpircHandler::handleTrackEof(uint32_t decodedMs, uint32_t durationMs,
+                                  size_t streamPosition, size_t streamSize) {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
     constexpr uint32_t eofSlackMs = 250;
     std::string currentTrackUri;
     int currentTrackIndex = playbackState->innerFrame.state.has_playing_track_index
@@ -101,10 +146,11 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
     if (advanced) {
       sendEvent(EventType::NEXT);
     }
-  };
+}
 
-  auto trackLoadedCallback = [this](std::shared_ptr<QueuedTrack> track,
-                                    bool paused = false) {
+void SpircHandler::handleTrackLoaded(std::shared_ptr<QueuedTrack> track,
+                                     bool paused) {
+    std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
     if (suppressPlaybackStartAfterEofReject(track)) {
       CSPOT_LOG(error,
                 "Suppressed playback-start after rejected EOF trackUri=%s sameTrack=1 ageMs=%llu",
@@ -120,34 +166,39 @@ SpircHandler::SpircHandler(std::shared_ptr<cspot::Context> ctx) {
     // Keep this as an internal bridge event so the PCM path can start
     // buffering. The public Spotify notify is sent only after real audio
     // reaches output in notifyAudioReachedPlayback().
-    sendEvent(EventType::PLAYBACK_START, (int)track->requestedPosition);
-  };
-
-  this->ctx = ctx;
-  this->trackPlayer = std::make_shared<TrackPlayer>(
-      ctx, trackQueue, EOFCallback, trackLoadedCallback);
-
-  // Subscribe to mercury on session ready
-  ctx->session->setConnectedHandler([this]() { this->subscribeToMercury(); });
+    if (track) {
+      PlaybackStartData start;
+      start.positionMs = (int)track->requestedPosition;
+      start.trackInstanceId = track->instanceId;
+      start.trackUri = track->ref.uri;
+      sendEvent(EventType::PLAYBACK_START, std::move(start));
+    }
 }
 
 void SpircHandler::subscribeToMercury() {
-  auto responseLambda = [this](MercurySession::Response& res) {
+  auto gate = callbackGate;
+  auto responseLambda = [gate](MercurySession::Response& res) {
+    std::lock_guard<std::mutex> callbackLock(gate->mutex);
+    SpircHandler* owner = gate->owner;
+    if (!owner) return;
     if (res.fail)
       return;
 
-    sendCmd(MessageType_kMessageTypeHello);
+    owner->sendCmd(MessageType_kMessageTypeHello);
     CSPOT_LOG(debug, "Sent kMessageTypeHello!");
 
     // Assign country code
-    this->ctx->config.countryCode = this->ctx->session->getCountryCode();
+    owner->ctx->config.countryCode = owner->ctx->session->getCountryCode();
   };
-  auto subscriptionLambda = [this](MercurySession::Response& res) {
+  auto subscriptionLambda = [gate](MercurySession::Response& res) {
+    std::lock_guard<std::mutex> callbackLock(gate->mutex);
+    SpircHandler* owner = gate->owner;
+    if (!owner) return;
     if (res.fail || res.parts.empty())
       return;
     CSPOT_LOG(debug, "Received subscription response");
 
-    this->handleFrame(res.parts[0]);
+    owner->handleFrame(res.parts[0]);
   };
 
   ctx->session->executeSubscription(
@@ -156,7 +207,42 @@ void SpircHandler::subscribeToMercury() {
       subscriptionLambda);
 }
 
-void SpircHandler::loadTrackFromURI(const std::string& uri) {}
+uint64_t SpircHandler::loadTrackFromURI(const std::string& uri) {
+  std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
+
+  TrackReference track;
+  track.uri = uri;
+  track.context = uri;
+  track.decodeURI();
+  if (track.gid.empty()) {
+    CSPOT_LOG(error, "Rejected local track with invalid URI: %s", uri.c_str());
+    return 0;
+  }
+
+  if (!trackPlayer->beginQueueReplacement(false)) {
+    CSPOT_LOG(error, "Rejected local track replacement: decoder not quiescent");
+    return 0;
+  }
+
+  // A local browser selection is the same state transition as a one-track
+  // SPIRC LOAD. Build the authoritative queue first, then wake the loader and
+  // decoder. Bypassing this transition leaves TrackQueue empty while the UI
+  // incorrectly reports that playback started.
+  playbackState->remoteTracks.clear();
+  playbackState->remoteTracks.push_back(std::move(track));
+  playbackState->innerFrame.state.has_playing_track_index = true;
+  playbackState->innerFrame.state.playing_track_index = 0;
+  playbackState->updatePositionMs(0);
+  playbackState->setActive(true);
+  playbackState->setPlaybackState(PlaybackState::State::Playing);
+
+  trackQueue->updateTracks(0, true);
+  const uint64_t instanceId = trackQueue->currentTrackInstanceId();
+  trackPlayer->endQueueReplacement();
+  trackPlayer->start();
+  notify();
+  return instanceId;
+}
 
 void SpircHandler::notifyAudioEnded(uint32_t finalPositionMs) {
   playbackState->updatePositionMs(finalPositionMs);
@@ -225,7 +311,7 @@ void SpircHandler::disconnect() {
 void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
   std::lock_guard<std::recursive_mutex> transitionLock(transitionMutex);
   // Decode received spirc frame
-  playbackState->decodeRemoteFrame(data);
+  if (!playbackState->decodeRemoteFrame(data)) return;
 
   switch (playbackState->remoteFrame.typ) {
     case MessageType_kMessageTypeNotify: {
@@ -283,8 +369,6 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
       }
       break;
     case MessageType_kMessageTypeLoad: {
-      this->trackPlayer->start();
-
       CSPOT_LOG(info, "Load frame tracks=%u remoteIdx=%d pos=%u localIdx=%d",
                 (unsigned)playbackState->remoteTracks.size(),
                 (int)playbackState->remoteFrame.state.playing_track_index,
@@ -296,8 +380,20 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
         break;
       }
 
+      const int remoteIndex =
+          playbackState->remoteFrame.state.playing_track_index;
+      if (remoteIndex < 0 ||
+          remoteIndex >= static_cast<int>(playbackState->remoteTracks.size())) {
+        CSPOT_LOG(error,
+                  "Rejected LOAD with invalid track index=%d count=%u",
+                  remoteIndex,
+                  (unsigned)playbackState->remoteTracks.size());
+        break;
+      }
+
+      this->trackPlayer->start();
+
       bool wasActive = playbackState->isActive();
-      int remoteIndex = playbackState->remoteFrame.state.playing_track_index;
       uint32_t requestedPosition = playbackState->remoteFrame.state.position_ms;
       bool sameTrackLoad =
           remoteIndex >= 0 &&
@@ -322,15 +418,17 @@ void SpircHandler::handleFrame(std::vector<uint8_t>& data) {
 
       playbackState->syncWithRemote();
 
-      // A Connect handoff must begin at Spotify's supplied audible position,
-      // not at the start of the track. The seekable startup path performs this
-      // before any PCM is published.
+      // A Connect handoff must begin at Spotify's supplied audible position.
+      // Quiesce the old decoder before publishing the remote queue so it can
+      // never consume either side of the replacement boundary.
+      if (!trackPlayer->beginQueueReplacement(false)) {
+        CSPOT_LOG(error, "Rejected LOAD: decoder not quiescent");
+        break;
+      }
       trackQueue->updateTracks(requestedPosition, true);
+      trackPlayer->endQueueReplacement();
 
       this->notify();
-
-      // Stop the current track, if any
-      trackPlayer->resetState();
       break;
     }
     case MessageType_kMessageTypeReplace: {

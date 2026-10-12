@@ -105,6 +105,7 @@ class MercurySession : public bell::Task, public cspot::Session {
   std::shared_ptr<cspot::TimeProvider> timeProvider;
   Header tempMercuryHeader = {};
   ConnectionEstabilishedCallback connectionReadyCallback = nullptr;
+  std::mutex connectionCallbackMutex;
 
   bell::Queue<cspot::Packet> packetQueue;
 
@@ -114,6 +115,8 @@ class MercurySession : public bell::Task, public cspot::Session {
   std::unordered_map<uint64_t, ResponseCallback> callbacks;
   std::unordered_map<std::string, ResponseCallback> subscriptions;
   std::unordered_map<uint32_t, AudioKeyCallback> audioKeyCallbacks;
+  std::mutex callbackMutex;
+  std::mutex requestSendMutex;
 
   uint64_t sequenceId = 1;
   uint32_t audioKeySequence = 1;

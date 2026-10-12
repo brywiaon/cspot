@@ -36,7 +36,9 @@ void MercurySession::runTask() {
 
   this->executeEstabilishedCallback = true;
   while (isRunning) {
-    if (!shanConn || !conn || !conn->isConnected()) {
+    auto activeConnection = connectionSnapshot();
+    auto activeShannon = shannonSnapshot();
+    if (!activeShannon || !activeConnection || !activeConnection->isConnected()) {
       failAllPending();
       reconnect();
       continue;
@@ -44,8 +46,10 @@ void MercurySession::runTask() {
 
     cspot::Packet packet = {};
     try {
-      packet = shanConn->recvPacket();
-      if (!conn || !conn->isConnected() || packet.command == 0) {
+      packet = activeShannon->recvPacket();
+      activeConnection = connectionSnapshot();
+      if (!activeConnection || !activeConnection->isConnected() ||
+          packet.command == 0) {
         failAllPending();
         reconnect();
         continue;
@@ -57,7 +61,8 @@ void MercurySession::runTask() {
         timeProvider->syncWithPingPacket(packet.data);
 
         this->lastPingTimestamp = timeProvider->getSyncedTimestamp();
-        this->shanConn->sendPacket(0x49, packet.data);
+        std::lock_guard<std::mutex> sendLock(requestSendMutex);
+        activeShannon->sendPacket(0x49, packet.data);
       } else {
         this->packetQueue.push(packet);
       }
@@ -81,13 +86,16 @@ void MercurySession::reconnect() {
   // task's stack once per attempt and eventually kills Spotify Connect.
   while (isRunning) {
     try {
-      this->conn = nullptr;
-      this->shanConn = nullptr;
+      // Reconnect is an exclusive transport transaction. Requests wait rather
+      // than racing a replaced Shannon cipher/socket generation.
+      std::lock_guard<std::mutex> transportTransaction(requestSendMutex);
+      clearTransport();
 
       this->connectWithRandomAp();
       auto token = this->authenticate(this->authBlob);
-      if (this->conn && this->conn->isConnected() && this->shanConn &&
-          !token.empty()) {
+      auto activeConnection = connectionSnapshot();
+      if (activeConnection && activeConnection->isConnected() &&
+          shannonSnapshot() && !token.empty()) {
         CSPOT_LOG(info, "Reconnection successful");
         BELL_SLEEP_MS(100);
         lastPingTimestamp = timeProvider->getSyncedTimestamp();
@@ -109,7 +117,8 @@ void MercurySession::reconnect() {
 
 void MercurySession::setConnectedHandler(
     ConnectionEstabilishedCallback callback) {
-  this->connectionReadyCallback = callback;
+  std::lock_guard<std::mutex> callbackLock(connectionCallbackMutex);
+  this->connectionReadyCallback = std::move(callback);
 }
 
 bool MercurySession::triggerTimeout() {
@@ -126,6 +135,7 @@ bool MercurySession::triggerTimeout() {
 }
 
 void MercurySession::unregister(uint64_t sequenceId) {
+  std::lock_guard<std::mutex> callbackLock(callbackMutex);
   auto callback = this->callbacks.find(sequenceId);
 
   if (callback != this->callbacks.end()) {
@@ -134,6 +144,7 @@ void MercurySession::unregister(uint64_t sequenceId) {
 }
 
 void MercurySession::unregisterAudioKey(uint32_t sequenceId) {
+  std::lock_guard<std::mutex> callbackLock(callbackMutex);
   auto callback = this->audioKeyCallbacks.find(sequenceId);
 
   if (callback != this->audioKeyCallbacks.end()) {
@@ -147,9 +158,12 @@ void MercurySession::disconnect() {
   // Reconnect deliberately clears conn before opening another AP. A source
   // handoff can request disconnect in that window, so never dereference the
   // transiently empty connection. Keep a snapshot alive through close().
-  auto activeConnection = conn;
-  if (activeConnection) {
-    activeConnection->close();
+  {
+    std::lock_guard<std::mutex> transportTransaction(requestSendMutex);
+    auto activeConnection = connectionSnapshot();
+    if (activeConnection) {
+      activeConnection->close();
+    }
   }
   std::scoped_lock lock(this->isRunningMutex);
 }
@@ -163,9 +177,13 @@ void MercurySession::handlePacket() {
 
   this->packetQueue.wtpop(packet, 200);
 
-  if (executeEstabilishedCallback && this->connectionReadyCallback != nullptr) {
-    executeEstabilishedCallback = false;
-    this->connectionReadyCallback();
+  if (executeEstabilishedCallback.exchange(false)) {
+    ConnectionEstabilishedCallback callback;
+    {
+      std::lock_guard<std::mutex> callbackLock(connectionCallbackMutex);
+      callback = connectionReadyCallback;
+    }
+    if (callback) callback();
   }
 
   switch (static_cast<RequestType>(packet.command)) {
@@ -191,10 +209,19 @@ void MercurySession::handlePacket() {
       // First four bytes mark the sequence id
       auto seqId = ntohl(extract<uint32_t>(packet.data, 0));
 
-      if (this->audioKeyCallbacks.count(seqId) > 0) {
-        auto success = static_cast<RequestType>(packet.command) ==
-                       RequestType::AUDIO_KEY_SUCCESS_RESPONSE;
-        this->audioKeyCallbacks[seqId](success, packet.data);
+      AudioKeyCallback callback;
+      {
+        std::lock_guard<std::mutex> callbackLock(callbackMutex);
+        auto found = audioKeyCallbacks.find(seqId);
+        if (found != audioKeyCallbacks.end()) {
+          callback = std::move(found->second);
+          audioKeyCallbacks.erase(found);
+        }
+      }
+      if (callback) {
+        const bool success = static_cast<RequestType>(packet.command) ==
+                             RequestType::AUDIO_KEY_SUCCESS_RESPONSE;
+        callback(success, packet.data);
       }
 
       break;
@@ -205,20 +232,29 @@ void MercurySession::handlePacket() {
       CSPOT_LOG(debug, "Received mercury packet");
 
       auto response = this->decodeResponse(packet.data);
-      if (this->callbacks.count(response.sequenceId) > 0) {
-        auto seqId = response.sequenceId;
-        this->callbacks[response.sequenceId](response);
-        this->callbacks.erase(this->callbacks.find(seqId));
+      ResponseCallback callback;
+      {
+        std::lock_guard<std::mutex> callbackLock(callbackMutex);
+        auto found = callbacks.find(response.sequenceId);
+        if (found != callbacks.end()) {
+          callback = std::move(found->second);
+          callbacks.erase(found);
+        }
       }
+      if (callback) callback(response);
       break;
     }
     case RequestType::SUBRES: {
       auto response = decodeResponse(packet.data);
 
       auto uri = std::string(response.mercuryHeader.uri);
-      if (this->subscriptions.count(uri) > 0) {
-        this->subscriptions[uri](response);
+      ResponseCallback subscription;
+      {
+        std::lock_guard<std::mutex> callbackLock(callbackMutex);
+        auto found = subscriptions.find(uri);
+        if (found != subscriptions.end()) subscription = found->second;
       }
+      if (subscription) subscription(response);
       break;
     }
     default:
@@ -230,19 +266,26 @@ void MercurySession::failAllPending() {
   Response response = {};
   response.fail = true;
 
-  // Fail all callbacks
-  for (auto& it : this->callbacks) {
-    it.second(response);
+  std::unordered_map<uint64_t, ResponseCallback> pendingCallbacks;
+  std::unordered_map<std::string, ResponseCallback> pendingSubscriptions;
+  std::unordered_map<uint32_t, AudioKeyCallback> pendingAudioKeys;
+  {
+    std::lock_guard<std::mutex> callbackLock(callbackMutex);
+    pendingCallbacks.swap(callbacks);
+    pendingSubscriptions.swap(subscriptions);
+    pendingAudioKeys.swap(audioKeyCallbacks);
   }
 
-  // Fail all subscriptions
-  for (auto& it : this->subscriptions) {
+  for (auto& it : pendingCallbacks) {
     it.second(response);
   }
-
-  // Remove references
-  this->subscriptions = {};
-  this->callbacks = {};
+  for (auto& it : pendingSubscriptions) {
+    it.second(response);
+  }
+  const std::vector<uint8_t> noAudioKey;
+  for (auto& it : pendingAudioKeys) {
+    it.second(false, noAudioKey);
+  }
 }
 
 MercurySession::Response MercurySession::decodeResponse(
@@ -313,6 +356,7 @@ uint64_t MercurySession::executeSubscription(RequestType method,
                                              ResponseCallback callback,
                                              ResponseCallback subscription,
                                              DataParts& payload) {
+  std::lock_guard<std::mutex> requestLock(requestSendMutex);
   CSPOT_LOG(debug, "Executing Mercury Request, type %s",
             RequestTypeMap[method].c_str());
 
@@ -329,19 +373,21 @@ uint64_t MercurySession::executeSubscription(RequestType method,
     method = RequestType::SEND;
   }
 
-  if (method == RequestType::SUB) {
-    this->subscriptions.insert({uri, subscription});
-  }
-
   auto headerBytes = pbEncode(Header_fields, &tempMercuryHeader);
-
-  this->callbacks.insert({sequenceId, callback});
+  const uint64_t requestSequence = sequenceId++;
+  {
+    std::lock_guard<std::mutex> callbackLock(callbackMutex);
+    if (method == RequestType::SUB && subscription) {
+      subscriptions[uri] = std::move(subscription);
+    }
+    if (callback) callbacks[requestSequence] = std::move(callback);
+  }
 
   // Structure: [Sequence size] [SequenceId] [0x1] [Payloads number]
   // [Header size] [Header] [Payloads (size + data)]
 
   // Pack sequenceId
-  auto sequenceIdBytes = pack<uint64_t>(hton64(this->sequenceId));
+  auto sequenceIdBytes = pack<uint64_t>(hton64(requestSequence));
   auto sequenceSizeBytes = pack<uint16_t>(htons(sequenceIdBytes.size()));
 
   sequenceIdBytes.insert(sequenceIdBytes.begin(), sequenceSizeBytes.begin(),
@@ -367,46 +413,49 @@ uint64_t MercurySession::executeSubscription(RequestType method,
                            payload[x].end());
   }
 
-  // Bump sequence id
-  this->sequenceId += 1;
-
   try {
-    this->shanConn->sendPacket(
+    auto activeShannon = shannonSnapshot();
+    if (!activeShannon) throw std::runtime_error("Spotify transport unavailable");
+    activeShannon->sendPacket(
         static_cast<std::underlying_type<RequestType>::type>(method),
         sequenceIdBytes);
   } catch (...) {
-    // @TODO: handle disconnect
+    unregister(requestSequence);
   }
 
-  return this->sequenceId - 1;
+  return requestSequence;
 }
 
 uint32_t MercurySession::requestAudioKey(const std::vector<uint8_t>& trackId,
                                          const std::vector<uint8_t>& fileId,
                                          AudioKeyCallback audioCallback) {
+  std::lock_guard<std::mutex> requestLock(requestSendMutex);
   auto buffer = fileId;
+  const uint32_t requestSequence = audioKeySequence++;
 
   // Store callback
-  this->audioKeyCallbacks.insert({this->audioKeySequence, audioCallback});
+  {
+    std::lock_guard<std::mutex> callbackLock(callbackMutex);
+    if (audioCallback) audioKeyCallbacks[requestSequence] = std::move(audioCallback);
+  }
 
   // Structure: [FILEID] [TRACKID] [4 BYTES SEQUENCE ID] [0x00, 0x00]
   buffer.insert(buffer.end(), trackId.begin(), trackId.end());
-  auto audioKeySequenceBuffer = pack<uint32_t>(htonl(this->audioKeySequence));
+  auto audioKeySequenceBuffer = pack<uint32_t>(htonl(requestSequence));
   buffer.insert(buffer.end(), audioKeySequenceBuffer.begin(),
                 audioKeySequenceBuffer.end());
   auto suffix = std::vector<uint8_t>({0x00, 0x00});
   buffer.insert(buffer.end(), suffix.begin(), suffix.end());
 
-  // Bump audio key sequence
-  this->audioKeySequence += 1;
-
   // Used for broken connection detection
   // this->lastRequestTimestamp = timeProvider->getSyncedTimestamp();
   try {
-    this->shanConn->sendPacket(
+    auto activeShannon = shannonSnapshot();
+    if (!activeShannon) throw std::runtime_error("Spotify transport unavailable");
+    activeShannon->sendPacket(
         static_cast<uint8_t>(RequestType::AUDIO_KEY_REQUEST_COMMAND), buffer);
   } catch (...) {
-    // @TODO: Handle disconnect
+    unregisterAudioKey(requestSequence);
   }
-  return audioKeySequence - 1;
+  return requestSequence;
 }
